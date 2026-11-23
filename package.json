@@ -1,0 +1,58 @@
+{
+  "name": "minimail",
+  "productName": "Minimail",
+  "version": "0.5.1",
+  "description": "One window for all your web mail - Gmail, Outlook, Yahoo, Proton and more",
+  "private": true,
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "autotest": "electron . --autotest",
+    "experiment": "electron . --experiment",
+    "icons": "node scripts/make-icon.js",
+    "dist": "electron-builder --win",
+    "icon-concepts": "node scripts/icon-concepts.js"
+  },
+  "build": {
+    "appId": "io.github.minimail",
+    "productName": "Minimail",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "protocols": {
+      "name": "Email",
+      "schemes": [
+        "mailto"
+      ]
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Minimail"
+    }
+  },
+  "devDependencies": {
+    "electron": "^45.2.3",
+    "electron-builder": "^26.18.0"
+  }
+}

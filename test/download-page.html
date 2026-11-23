@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Minimail test page</title>
+<style>
+  body { font-family: sans-serif; padding: 40px; background: #141519; color: #e8eaed; }
+  textarea { display: block; width: 320px; height: 80px; margin-top: 20px; font-size: 16px; }
+</style>
+</head>
+<body>
+<h1 id="heading">Minimail test page</h1>
+<textarea id="typing" placeholder="somewhere you type"></textarea>
+<script>
+  // Driven by src/diagnostics.js (--experiment). Never loaded in normal use.
+  const blobs = [];
+  const blobUrl = (text) => {
+    const b = new Blob([text], { type: 'application/octet-stream' });
+    blobs.push(b);
+    return URL.createObjectURL(b);
+  };
+  window.popupBlob = () => !!window.open(blobUrl('minimail-test popup\n'));
+  window.anchorBlob = (name) => {
+    const a = document.createElement('a');
+    a.href = blobUrl('minimail-test ' + name + '\n');
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    return true;
+  };
+  window.navigateBlob = () => {
+    location.href = blobUrl('minimail-test navigate\n');
+    return true;
+  };
+  window.blankPopup = () => !!window.open('about:blank');
+</script>
+</body>
+</html>

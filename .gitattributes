@@ -1,0 +1,5 @@
+# Store text with LF line endings whatever the machine's Git setting, so the
+# same files check out the same everywhere. Binary files are detected as such.
+* text=auto eol=lf
+*.png binary
+*.ico binary

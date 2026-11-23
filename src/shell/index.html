@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:">
+<title>Minimail</title>
+<link rel="stylesheet" href="shell.css">
+</head>
+<body>
+<div id="titlebar">
+  <img id="logo" src="logo.png" alt="" draggable="false">
+  <span id="wordmark">MINIMA<span class="accent">I</span>L</span>
+  <span id="account" hidden></span>
+  <span id="unread" hidden></span>
+  <div id="dl-toast" role="status">
+    <span id="dl-file"></span>
+    <button id="dl-open" type="button">Open</button>
+    <button id="dl-folder" type="button" class="ghost">Folder</button>
+    <button id="dl-close" type="button" class="ghost close" title="Dismiss" aria-label="Dismiss">&#10005;</button>
+  </div>
+</div>
+<nav id="sidebar">
+  <div id="accounts"></div>
+  <div class="spacer"></div>
+  <button id="add" type="button" title="Add an account">+</button>
+  <button id="settings" type="button" title="Settings">
+    <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor" aria-hidden="true"><path d="M19.4 13a7.6 7.6 0 0 0 .1-1 7.6 7.6 0 0 0-.1-1l2.1-1.7a.5.5 0 0 0 .1-.6l-2-3.5a.5.5 0 0 0-.6-.2l-2.5 1a7.7 7.7 0 0 0-1.7-1l-.4-2.6a.5.5 0 0 0-.5-.4h-4a.5.5 0 0 0-.5.4l-.3 2.6a7.7 7.7 0 0 0-1.7 1l-2.5-1a.5.5 0 0 0-.6.2l-2 3.5a.5.5 0 0 0 .1.6L4.5 11a7.6 7.6 0 0 0 0 2l-2.1 1.7a.5.5 0 0 0-.1.6l2 3.5c.1.2.4.3.6.2l2.5-1a7.7 7.7 0 0 0 1.7 1l.3 2.6c.1.2.3.4.5.4h4c.3 0 .5-.2.5-.4l.4-2.6a7.7 7.7 0 0 0 1.7-1l2.5 1c.2.1.5 0 .6-.2l2-3.5a.5.5 0 0 0-.1-.6L19.4 13Zm-7.4 2.5A2.5 2.5 0 1 1 12 10.5a2.5 2.5 0 0 1 0 5Z"/></svg>
+  </button>
+  <button id="mute" type="button" title="Mute all notifications for a while"></button>
+  <button id="collapse" type="button" title="Hide sidebar (Ctrl+Shift+B)">&#8249;</button>
+</nav>
+<div id="welcome">
+  <h1 class="wordmark">MINIMA<span class="accent">I</span>L</h1>
+  <p>One window for all your web mail.<br>Gmail, Outlook, Yahoo, Proton and more — each account keeps its own sign-in.</p>
+  <button id="welcome-add" type="button">Add an account</button>
+</div>
+<script src="shell.js"></script>
+</body>
+</html>

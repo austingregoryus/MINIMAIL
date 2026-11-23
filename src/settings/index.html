@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:">
+<title>Minimail Settings</title>
+<link rel="stylesheet" href="settings.css">
+</head>
+<body>
+<div id="titlebar">
+  <img id="logo" src="logo.png" alt="" draggable="false">
+  <span id="wordmark">MINIMA<span class="accent">I</span>L</span>
+  <span class="part">Settings</span>
+</div>
+
+<h2>Accounts</h2>
+<p class="hint section-hint">What each account does when new mail arrives. The unread count is the red number on its avatar in the sidebar.</p>
+<div class="acc-head"><span></span><span>Unread count</span><span>Sound</span><span>Pop-up</span></div>
+<div id="accounts"></div>
+<p class="hint" id="no-accounts" hidden>No accounts yet. Add one with the + button in the sidebar.</p>
+
+<h2>App</h2>
+
+<div class="row">
+  <div>
+    <div class="label">Taskbar badge</div>
+    <div class="hint">Show the total unread count on the Windows taskbar icon.</div>
+  </div>
+  <button class="toggle" id="p-showBadge" type="button" aria-label="Taskbar badge"></button>
+</div>
+
+<div class="row">
+  <div>
+    <div class="label">Prefetch background accounts</div>
+    <div class="hint">Load your other accounts right after launch, for instant switching. Uses more memory. When off, an account loads the first time you click it; unread counts and notifications work either way. Applies on next launch.</div>
+  </div>
+  <button class="toggle" id="p-prefetchAccounts" type="button" aria-label="Prefetch background accounts"></button>
+</div>
+
+<div class="row">
+  <div>
+    <div class="label">Auto-sleep background Gmail accounts</div>
+    <div class="hint">Unload Gmail accounts you haven&#8217;t used for 10 minutes to free memory. They keep checking for new mail; clicking one reloads it. Other services can only be checked while open, so they stay loaded.</div>
+  </div>
+  <button class="toggle" id="p-sleepAccounts" type="button" aria-label="Auto-sleep background Gmail accounts"></button>
+</div>
+
+<div class="row">
+  <div>
+    <div class="label">Start at login</div>
+    <div class="hint">Launch Minimail when you sign in to Windows.</div>
+  </div>
+  <button class="toggle" id="p-launchOnStartup" type="button" aria-label="Start at login"></button>
+</div>
+
+<div class="foot"><span class="wordmark">MINIMA<span class="accent">I</span>L</span> <span id="version"></span></div>
+<script src="settings.js"></script>
+</body>
+</html>

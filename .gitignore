@@ -1,0 +1,15 @@
+# Installed dependencies (hundreds of MB; restored with `npm install`)
+node_modules/
+
+# Build output: installers and the unpacked app (restored with `npm run dist`)
+dist/
+
+# Generated preview, not a source file
+build/icon-concepts.png
+
+# Logs and editor / system clutter
+*.log
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
