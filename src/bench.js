@@ -6,6 +6,9 @@
 //   MINIMAIL_BENCH_PLAN=frames    settle, then list which process holds what, over a few minutes
 //   MINIMAIL_BENCH_PLAN=doze      watch the real accounts unload on short timers, and one
 //                                 without a feed reload out of sight, be read and close again
+//   MINIMAIL_BENCH_PLAN=linger    after an account unloads, how soon its memory is really back
+//   MINIMAIL_BENCH_PLAN=shot      the main window as a picture for the README: needs
+//                                 MINIMAIL_SHOT_OUT, and shows the window (inactive) for ~2s
 //   MINIMAIL_BENCH_SHOW=1         also measure with the window shown (inactive) at the end
 //   MINIMAIL_BENCH_SWITCHES=...   Chromium switches to try (see main.js)
 //   MINIMAIL_BENCH_BLOCK=a,b      also refuse these hosts (to see what a page costs without them)
@@ -25,7 +28,7 @@
 // comparable. Two numbers per process: the private working set (what Task
 // Manager's "Memory" column shows, and what the machine can really get back)
 // and the commit charge (everything the process holds, resident or pushed out).
-const { app, session } = require('electron');
+const { app, session, nativeImage, screen, desktopCapturer } = require('electron');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -239,6 +242,190 @@ async function lingerTimeline(target, accounts, at) {
   }
 }
 
+// The main window as a picture for the README. Real pages, so everything above
+// applies (a copy of the profile, sign-in hosts refused, toasts off), and what
+// is private stays out of the picture two ways. Minimail's own chrome — title
+// bar, sidebar — shows made-up account names, counts and no photos. The mail
+// page is pixelated wherever mail is, and those places are read from the
+// page's own layout rather than looked for by eye, so nobody has to see the
+// mail to hide it. The window is shown, without focus, for about two seconds.
+const DEMO_LABELS = ['alex@gmail.com', 'sam@northwind.co', 'riley@proton.me', 'casey@yahoo.com', 'jordan@outlook.com', 'taylor@aol.com'];
+const DEMO_COUNTS = [3, 0, 12, 0, 0, 0];
+const PIXEL = 9; // one pixelated block, in CSS pixels
+
+// Where the private parts of a page are, in its own coordinates. For a service
+// not listed here the whole page is pixelated. The rule for Gmail is built on
+// two things its page certainly has — the header (logo, search, icons) and the
+// folder column — rather than on guesses about the rest of its layout: below
+// the toolbar row, everything is hidden. What stays visible is the header (its
+// account chip aside), the Compose button and the toolbar's left-hand controls.
+// A catch-all then hides any text that says how much mail there is, how much is
+// stored, when the account was last used, or an address, wherever it is.
+const WHOLE_VIEW = '({ zones: [{ x: 0, y: 0, w: innerWidth, h: innerHeight }], vw: innerWidth, vh: innerHeight })';
+const PRIVATE_ZONES = {
+  gmail: `(() => {
+    const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    const shown = (sel) => [...document.querySelectorAll(sel)].filter(visible);
+    const box = (el) => { const q = el.getBoundingClientRect(); return { x: q.left, y: q.top, w: q.width, h: q.height }; };
+    const union = (els) => {
+      let l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
+      for (const el of els) { const q = el.getBoundingClientRect(); l = Math.min(l, q.left); t = Math.min(t, q.top); r = Math.max(r, q.right); b = Math.max(b, q.bottom); }
+      return r === -Infinity ? null : { x: l, y: t, w: r - l, h: b - t };
+    };
+    const zones = [];
+    const folders = union(shown('div[role="navigation"] a, div[role="navigation"] [role="treeitem"]'));
+    if (folders) zones.push({ x: 0, y: folders.y, w: folders.x + folders.w, h: innerHeight - folders.y }); // the whole folder column, from the first folder down
+    const left = folders ? folders.x + folders.w : 0; // where the folder column ends
+    const header = document.querySelector('header[role="banner"], header');
+    const headerBottom = header ? header.getBoundingClientRect().bottom : 100;
+    const toolbar = document.querySelector('[role="toolbar"], [gh="tm"]');
+    const bar = toolbar && toolbar.getBoundingClientRect();
+    const toolbarBottom = bar && bar.top >= headerBottom - 4 && bar.top <= headerBottom + 40 ? Math.min(bar.bottom, headerBottom + 80) : headerBottom + 58;
+    zones.push({ x: left, y: toolbarBottom, w: innerWidth - left, h: innerHeight - toolbarBottom }); // everything under the toolbar row
+    zones.push({ x: (left + innerWidth) / 2, y: headerBottom, w: (innerWidth - left) / 2, h: toolbarBottom - headerBottom }); // the toolbar row's right end, where counts are
+    for (const el of shown('[role="tablist"], a[aria-label*="Google Account"], [email], [data-hovercard-id], img[src^="https://lh3.googleusercontent.com"]')) zones.push(box(el));
+    const tell = /\\d+\\s*[–-]\\s*\\d+\\s*of\\s*[\\d,.]+|\\d+(?:\\.\\d+)?%\\s*of\\s*[\\d,.]+\\s*[GTM]B|[GTM]B\\s+used|account\\s+activity|[\\w.+-]+@[\\w-]+\\.[\\w.-]+/;
+    const seen = new Set();
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const el = node.parentElement;
+      if (!el || seen.has(el) || el.children.length > 12 || !tell.test(el.textContent)) continue;
+      seen.add(el); // tested as a whole: "1–50 of 362,255" and "10% of 10,244 GB used" are split across elements
+      if (visible(el)) zones.push(box(el));
+    }
+    return { zones, vw: innerWidth, vh: innerHeight };
+  })()`,
+};
+
+// Replaces each block of a region with its average colour: unreadable, and
+// it reads as "hidden on purpose" rather than as a smudge.
+function pixelate(image, rects, block) {
+  const { width, height } = image.getSize();
+  const from = image.toBitmap();
+  const into = Buffer.from(from);
+  for (const r of rects) {
+    const x0 = Math.max(0, Math.floor(r.x - block / 2));
+    const y0 = Math.max(0, Math.floor(r.y - block / 2));
+    const x1 = Math.min(width, Math.ceil(r.x + r.w + block / 2));
+    const y1 = Math.min(height, Math.ceil(r.y + r.h + block / 2));
+    for (let by = y0; by < y1; by += block) {
+      for (let bx = x0; bx < x1; bx += block) {
+        const bw = Math.min(block, x1 - bx);
+        const bh = Math.min(block, y1 - by);
+        let blue = 0;
+        let green = 0;
+        let red = 0;
+        for (let y = by; y < by + bh; y++) for (let x = 0, i = (y * width + bx) * 4; x < bw; x++, i += 4) (blue += from[i]), (green += from[i + 1]), (red += from[i + 2]);
+        const n = bw * bh;
+        blue = Math.round(blue / n);
+        green = Math.round(green / n);
+        red = Math.round(red / n);
+        for (let y = by; y < by + bh; y++) for (let x = 0, i = (y * width + bx) * 4; x < bw; x++, i += 4) (into[i] = blue), (into[i + 1] = green), (into[i + 2] = red);
+      }
+    }
+  }
+  return nativeImage.createFromBitmap(into, { width, height });
+}
+
+// Draws `over` onto `base` with its top-left corner at (x, y). Both opaque.
+function composite(base, over, x, y) {
+  const { width, height } = base.getSize();
+  const size = over.getSize();
+  const into = base.toBitmap();
+  const from = over.toBitmap();
+  for (let row = 0; row < size.height && y + row < height; row++) {
+    const to = ((y + row) * width + x) * 4;
+    from.copy(into, to, row * size.width * 4, row * size.width * 4 + Math.min(size.width, width - x) * 4);
+  }
+  return nativeImage.createFromBitmap(into, { width, height });
+}
+
+// A page that is not painting (just shown without focus, or covered by another
+// window) may refuse to be captured the first few times it is asked.
+async function retrying(what, tries = 6) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await what();
+    } catch (err) {
+      last = err;
+      await sleep(500);
+    }
+  }
+  throw last;
+}
+
+// The window's own content area, as Windows has it on screen — which works
+// whether or not it is covered.
+async function captureWindow(win) {
+  const bounds = win.getBounds();
+  const content = win.getContentBounds();
+  const scale = screen.getDisplayMatching(bounds).scaleFactor;
+  const sources = await desktopCapturer.getSources({ types: ['window'], thumbnailSize: { width: Math.round(bounds.width * scale), height: Math.round(bounds.height * scale) } });
+  const handle = win.getNativeWindowHandle().readBigUInt64LE().toString();
+  const mine = sources.find((s) => s.id === `window:${handle}:0`);
+  if (!mine) throw new Error('the window is not among those that can be captured');
+  const per = mine.thumbnail.getSize().width / bounds.width; // pixels per point
+  const crop = (v) => Math.round(v * per);
+  return mine.thumbnail.crop({ x: crop(content.x - bounds.x), y: crop(content.y - bounds.y), width: crop(content.width), height: crop(content.height) });
+}
+
+async function shotTimeline(target, accounts) {
+  const out = process.env.MINIMAIL_SHOT_OUT;
+  if (!out) throw new Error('set MINIMAIL_SHOT_OUT to the PNG to write');
+  const win = target.win;
+  const work = screen.getPrimaryDisplay().workAreaSize;
+  win.setContentSize(Math.min(1440, work.width - 80), Math.min(900, work.height - 80));
+  win.center();
+  await sleep(15000); // the pages up, and the first probes for profile photos over
+
+  // Minimail's own chrome: made-up names, counts and switches, and no photos.
+  // (Not saved: this is the copy's settings, and they are put back by nothing.)
+  accounts.forEach((acct, i) => {
+    acct.label = DEMO_LABELS[i] || `account${i + 1}@example.com`;
+    acct.avatar = null;
+    acct.notify = { count: true, sound: true, banner: true };
+    const rec = target.views.get(acct.id);
+    clearInterval(rec.pollTimer); // the count stays what it is set to here
+    rec.count = DEMO_COUNTS[i] || 0;
+  });
+  target.updateBadge();
+  target.pushAccounts();
+  await sleep(700); // the sidebar has redrawn
+
+  const id = target.settings.activeId;
+  const view = target.views.get(id).view;
+  const shown = target.settings.accounts.findIndex((a) => a.id === id);
+  const zones = await view.webContents.executeJavaScript(PRIVATE_ZONES[providerOf(accounts[shown])] || WHOLE_VIEW);
+  const at = view.getBounds();
+  // For when a region is not where it was meant to be: where each one is (never what is in it).
+  if (process.env.MINIMAIL_BENCH_DEBUG) console.log(`[bench] page ${zones.vw}x${zones.vh}; hidden regions: ${JSON.stringify(zones.zones.map((z) => [z.x, z.y, z.w, z.h].map(Math.round)))}`);
+
+  win.showInactive(); // on screen, but focus stays where the user left it
+  await sleep(2000); // painted
+  let picture;
+  let how = 'page by page';
+  try {
+    const chrome = await retrying(() => win.webContents.capturePage());
+    const mail = await retrying(() => view.webContents.capturePage());
+    const per = mail.getSize().width / zones.vw;
+    picture = composite(chrome, mail, Math.round(at.x * per), Math.round(at.y * per));
+  } catch (err) {
+    // A page that is covered is not painting, and will not be captured: take
+    // the window as a whole instead.
+    how = `the window as a whole (a page would not be captured: ${String(err).slice(0, 60)})`;
+    picture = await captureWindow(win);
+  }
+  win.hide();
+
+  const per = picture.getSize().width / win.getContentSize()[0]; // pixels per point
+  const rects = zones.zones.map((z) => ({ x: (z.x + at.x) * per, y: (z.y + at.y) * per, w: z.w * per, h: z.h * per }));
+  picture = pixelate(picture, rects, Math.max(4, Math.round(PIXEL * per)));
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.writeFileSync(out, picture.toPNG());
+  console.log(`[bench] saved ${out} (${picture.getSize().width}x${picture.getSize().height}); ${rects.length} region(s) of the mail page pixelated; captured ${how}`);
+}
+
 async function measure(target) {
   // Nothing may reach the screen or the speakers.
   target.setNotifier(() => {});
@@ -291,6 +478,7 @@ async function measure(target) {
   };
   const samples = [];
   if (plan === 'linger') return lingerTimeline(target, accounts, at);
+  if (plan === 'shot') return shotTimeline(target, accounts);
   if (plan === 'doze') {
     for (const s of [5, 10]) samples.push(await at(s, 'loaded'));
     await dozeTimeline(target, accounts, at);

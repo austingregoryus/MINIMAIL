@@ -1519,6 +1519,7 @@ if (!app.requestSingleInstanceLock() && !DIAGNOSTIC) {
         ensureRecord,
         wakeView,
         reconcile,
+        pushAccounts,
         switchTo,
         sleepView,
         openSettings,
