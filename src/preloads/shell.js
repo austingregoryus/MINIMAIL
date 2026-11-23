@@ -26,5 +26,7 @@ contextBridge.exposeInMainWorld('minimail', {
   muteMenu: (x, y) => ipcRenderer.send('shell:mute-menu', { x, y }),
   // The Settings window asks to be re-sized when its content grows or shrinks.
   fit: () => ipcRenderer.send('window:fit-settings'),
+  // Whether the shell's page is on screen: not minimized, not fully covered.
+  setVisible: (visible) => ipcRenderer.send('shell:visibility', visible === true),
   onSound: (fn) => ipcRenderer.on('shell:sound', () => fn()),
 });

@@ -10,18 +10,18 @@ Gmail (see `../kiwi-re/FINDINGS.md`).
 | Service | Tried with a real account | Unread count | New-mail toast | Compose from `mailto:` | Unloads when idle |
 | --- | --- | --- | --- | --- | --- |
 | Gmail | yes, in daily use | instant, from the page | sender + subject | yes | yes (10 min) |
-| Proton Mail | no — title format taken from Proton's own source | from the page | count only | — | no |
-| Outlook (personal, work or school) | no — kept ready | from the page (format assumed) | count only | built, untried | no |
-| Yahoo Mail | no — kept ready | from the page (format assumed) | count only | built, untried | no |
-| AOL Mail | no — kept ready | from the page (format assumed) | count only | — | no |
+| Proton Mail | yes — signed in, count and title confirmed | from the page | count only (not yet seen with real mail) | — | optional |
+| Outlook (personal, work or school) | no — kept ready | from the page (format assumed) | count only | built, untried | optional |
+| Yahoo Mail | no — kept ready | from the page (format assumed) | count only | built, untried | optional |
+| AOL Mail | no — kept ready | from the page (format assumed) | count only | — | optional |
 
-**Gmail is the only service that has been used with a real account.** Proton
-Mail's title format is known exactly, because its web app is open source
-(`useMailboxPageTitle.ts`): `(3) Inbox | you@proton.me | Proton Mail`, with the
-number left out when nothing is unread. Its sign-in has not been tried. Outlook,
-Yahoo and AOL are adapters kept ready for anyone who has those accounts: where to
-start and which hosts stay in the app are set, but their title formats are assumed
-and nothing has been confirmed.
+**Gmail and Proton Mail are the only services that have been used with a real
+account.** Proton Mail's title format is known exactly, because its web app is
+open source (`useMailboxPageTitle.ts`): `(3) Inbox | you@proton.me | Proton Mail`,
+with the number left out when nothing is unread — and also, for a moment, while
+the page is starting up. Outlook, Yahoo and AOL are adapters kept ready for
+anyone who has those accounts: where to start and which hosts stay in the app
+are set, but their title formats are assumed and nothing has been confirmed.
 
 Leave Proton's own **"Show unread count in favicon"** setting off. With it on,
 Proton drops the count from the title and Minimail would always read zero.
@@ -29,7 +29,9 @@ Proton drops the count from the title and Minimail would always read zero.
 Gmail is also the one service that can be checked with its page closed: it has a
 feed that accepts the account's own cookies. That is what lets it unload when idle
 and still notify, and what gives its toasts a sender and subject. The others can
-only be watched while open, so they stay loaded — which costs memory.
+only be watched while open. By default they stay loaded for that reason, which
+costs memory; with *Also unload Proton, Outlook, Yahoo and AOL accounts* on, they
+unload too and are reloaded out of sight every few minutes instead.
 
 Adding a service is one entry in `src/providers.js`.
 
@@ -77,6 +79,25 @@ dev mode (both use `%APPDATA%/minimail`).
   Unread counts keep counting.
 - **Auto-sleep.** A background Gmail account unloads after 10 minutes; counts and
   notifications keep working, and clicking it reloads it.
+- **Also unload the other services** (off by default). Proton, Outlook, Yahoo and
+  AOL accounts unload like Gmail ones do, and since nothing can check them with
+  their page closed, their page is loaded out of sight every 5 minutes instead:
+  not in the window, read once its count has settled, closed again. New mail
+  shows up at the next check, so their notifications can be up to 5 minutes
+  late. A rise is real; a drop is taken as read too, except a drop to zero,
+  which has to hold for a while after the page finished loading, because these
+  pages report zero while starting up (Proton shows `Inbox | …` before
+  `(3957) Inbox | …`). A check that lands on a sign-in page is never repeated:
+  that is what puts passkey prompts on screen. It waits for the account to be
+  opened. A page being checked may not open windows, and clicking the account
+  while it is being checked keeps that very page.
+- **Also unload the account on screen when away** (off by default). Chromium
+  reports when a window has gone out of sight — minimized, or fully covered —
+  through the page's visibility, the same signal it throttles pages on. After
+  10 minutes of that, the Gmail account being shown unloads too and comes back
+  when the window is seen again. Only a service with a feed can (nothing must
+  stop notifying), and never while something is in progress: a compose box in
+  the page, a focused text field, or a window of that account open.
 - **Links.** Each service's own site and sign-in flow stay in the app. Everything
   else opens in your default browser. Ctrl+click opens a background browser tab.
 - **Downloads.** Attachments are saved straight to your `Downloads` folder, and a
@@ -115,7 +136,7 @@ clears that account's saved sign-in).
 
 The gear at the bottom of the sidebar. **Accounts** has one row per account with
 its *Unread count*, *Sound* and *Pop-up* switches. **App** has the taskbar badge,
-prefetch, auto-sleep, and start at login.
+prefetch, the three unloading switches above, and start at login.
 
 `%APPDATA%/minimail/settings.json` (the previous version is kept as `settings.bak.json`):
 
@@ -131,6 +152,8 @@ prefetch, auto-sleep, and start at login.
   "prefetchAccounts": true,
   "showBadge": true,
   "sleepAccounts": true,
+  "dozeOthers": false,
+  "sleepWhenAway": false,
   "launchOnStartup": false,
   "mutedUntil": 0
 }
@@ -138,6 +161,44 @@ prefetch, auto-sleep, and start at login.
 
 A missing `notify` switch means "on". `mutedUntil` is when the mute ends, in
 milliseconds; `0` is not muted, and `8640000000000000` is "until I turn it back on".
+
+## Memory
+
+Minimail is a shell around web apps, and the web apps are what it costs. Measured
+on a Windows machine with two Gmail accounts and one Proton Mail account, all
+three loaded and the window hidden (private working set, the number Task Manager
+shows):
+
+| What | Memory |
+| --- | --- |
+| Gmail, personal account | 216–245 MB |
+| Gmail, Workspace account | 197–237 MB |
+| — plus Google Chat, which that account loads into the page | 153–187 MB |
+| — plus Google Meet, same | 44–53 MB |
+| Proton Mail | 224–294 MB (briefly 460 MB while it starts) |
+| Main process, GPU process, network service, shell window | about 155 MB |
+
+All three loaded: 1.1–1.2 GB. Two of them (a Gmail account and Proton): about
+640 MB. With the window in use rather than hidden it was about 40% higher in one
+measurement (735 MB against 515 MB for the same two accounts), mostly in the GPU
+process. Idle CPU is about 0.1%.
+
+What Minimail itself adds is the last row, and it is already near the floor for
+Electron: of the Chromium switches and settings tried, none was worth taking
+(no spare renderer: no effect; a different graphics backend: 9 MB; forcing a
+hidden page to release memory: 5%). The rest is the pages, so the only thing
+left that helps is loading fewer of them:
+
+- **Turn Chat and Meet off inside Gmail** (Gmail's own settings, *Chat and
+  Meet*) for any account that has them: about 200 MB, for that whole account.
+  They can't be refused from outside — Gmail just keeps retrying.
+- **Prefetch background accounts** off: only the account you start on is loaded;
+  the others load when first clicked. Unread counts and notifications are not
+  affected for Gmail; for the other services they then start at the first click.
+- **The two unloading switches** above, for what stays loaded all day.
+
+An account's memory is back within about a minute of it unloading: the page's
+process can take up to half a minute to exit after it is closed.
 
 ## Known limits
 
@@ -152,6 +213,13 @@ milliseconds; `0` is not muted, and `8640000000000000` is "until I turn it back 
   English ("Inbox").
 - New mail that arrives while you have a conversation open is notified when you go
   back to the Inbox.
+- With *Also unload the other services* on, the count of a Proton, Outlook, Yahoo
+  or AOL account is only as fresh as its last check, and its notifications can be
+  as much as 5 minutes late. Each check loads the page for about 10 seconds.
+- With *Also unload the account on screen when away* on, coming back to Minimail
+  after more than 10 minutes away reloads the account you were on. A compose box
+  in the page, or a pop-out window of that account, keeps it loaded; a conversation
+  you had open does not.
 - Pasting images into a compose box, and attachment downloads, have only been
   tried with Gmail.
 - No tray mode — closing the window quits the app. The installer is unsigned, so
@@ -182,5 +250,23 @@ MINIMAIL_ALLOW_SIGNIN_PAGES=1 npx electron . --online   # loads Google's real si
 `--online` puts sign-in prompts (passkeys, Windows Hello, authenticator pushes) on
 the screen every time it runs. It refuses to start without the variable above.
 
-`MINIMAIL_DEBUG=1` enables verbose logging. `MINIMAIL_SLEEP_MS` and
-`MINIMAIL_POLL_MS` override the auto-sleep and polling intervals for testing.
+A third mode touches the real world, to measure memory. **Say so before running it.**
+
+```
+powershell -File ..\kiwi-re\scripts\refresh-bench-profile.ps1     # a copy of the profile
+MINIMAIL_ALLOW_ACCOUNT_PAGES=1 MINIMAIL_BENCH_PROFILE=<that copy> npx electron . --bench
+```
+
+`--bench` loads your real, signed-in mail pages, on that copy only (it refuses the
+profile itself), in a window that is never shown, with toasts and sounds off, and
+with every sign-in host refused — so no sign-in page, and no sign-in prompt, can
+appear however many times it runs. It prints what each process costs over a fixed
+timeline. `MINIMAIL_BENCH_PLAN=plain|frames|doze|linger` picks what it watches;
+`MINIMAIL_BENCH_SWITCHES` passes Chromium switches; `MINIMAIL_BENCH_BLOCK` refuses
+extra hosts. The copy holds sign-ins: delete it afterwards.
+
+`MINIMAIL_DEBUG=1` enables verbose logging. These override timings, for tests:
+`MINIMAIL_SLEEP_MS` and `MINIMAIL_POLL_MS` (auto-sleep delay and polling interval),
+`MINIMAIL_DOZE_MS` (time between checks), `MINIMAIL_SETTLE_MS` and
+`MINIMAIL_ZERO_MS` (how long a checked page's count must hold, and how long a
+zero must), `MINIMAIL_CHECKIN_MS` (how long a check may last).

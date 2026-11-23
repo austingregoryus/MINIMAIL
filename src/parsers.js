@@ -229,6 +229,31 @@ function riseStep(state, count, now) {
   return now < state.settleUntil ? 0 : fresh;
 }
 
+// A check-in (main.js, "dozing") loads a page out of sight, reads its title
+// and closes it again, every few minutes. What the title last showed cannot
+// simply be taken as the count, because a page reports no count — or zero —
+// while it is still starting up (Proton Mail shows "Inbox | …" before
+// "(3957) Inbox | …"). So, between the count before and the last one seen:
+// - a rise is real: no page reports more than it has while loading;
+// - a drop to a number above zero is real, for the same reason;
+// - a drop to zero is real only once the page has finished loading and has
+//   stayed at zero for CHECKIN_ZERO_HOLD_MS. Until then the old count stands,
+//   so a slow page can never turn its own start-up into "3957 new messages"
+//   at the next check.
+// Returns the count to show and how many new messages arrived. `known` false
+// means the account's count has never been read this session: the first
+// reading is a baseline, never new mail. `heldMs` is how long the page has
+// shown zero since it finished loading; `holdMs` is how long it has to, and
+// exists so that tests can shorten it (main.js waits the same amount).
+const CHECKIN_ZERO_HOLD_MS = 8000;
+
+function settleCheckIn(previous, seen, { known = true, heldMs = 0, holdMs = CHECKIN_ZERO_HOLD_MS } = {}) {
+  if (!known || seen === previous) return { count: seen, fresh: 0 };
+  if (seen > previous) return { count: seen, fresh: seen - previous };
+  if (seen > 0 || previous === 0) return { count: seen, fresh: 0 };
+  return heldMs >= holdMs ? { count: 0, fresh: 0 } : { count: previous, fresh: 0 };
+}
+
 function formatCount(n) {
   return Number(n || 0).toLocaleString('en-US');
 }
@@ -276,6 +301,8 @@ module.exports = {
   riseStep,
   RISE_SETTLE_MS,
   RISE_HOLD_MS,
+  settleCheckIn,
+  CHECKIN_ZERO_HOLD_MS,
   formatCount,
   MUTE_UNTIL_TURNED_OFF,
   isMuted,
