@@ -205,6 +205,12 @@ The screenshots are the app itself. `npx electron . --shot` renders the sidebar,
 
 `MINIMAIL_SLEEP_MS` and `MINIMAIL_POLL_MS` (auto-sleep delay and polling interval), `MINIMAIL_DOZE_MS` (time between checks), `MINIMAIL_SETTLE_MS` and `MINIMAIL_ZERO_MS` (how long a checked page's count must hold, and how long a zero must), `MINIMAIL_CHECKIN_MS` (how long a check may last). `MINIMAIL_DEBUG=1` enables verbose logging.
 
+## Licence
+
+MIT — see [LICENSE](LICENSE). Anyone may use, change and redistribute Minimail for anything, commercially included, on two conditions: the copyright and permission notice stays with it, and it comes with no warranty.
+
+It covers Minimail's own code. The names and marks of Gmail, Proton Mail, Outlook, Yahoo Mail and AOL are not covered by it: they belong to their owners.
+
 ## Credits
 
 Inspired by Kiwi for Gmail.

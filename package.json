@@ -4,6 +4,7 @@
   "version": "0.6.0",
   "description": "One window for all your web mail - Gmail, Outlook, Yahoo, Proton and more",
   "private": true,
+  "license": "MIT",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
