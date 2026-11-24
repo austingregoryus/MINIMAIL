@@ -13,7 +13,6 @@ test('every provider in the menu is fully described', () => {
     assert.ok(Array.isArray(p.hosts) && p.hosts.length > 0, id + ' lists the hosts that stay in the app');
     for (const host of p.hosts) assert.ok(!host.includes('://') && !host.includes('/'), `${id}: "${host}" is a bare host name`);
   }
-  assert.equal(PROVIDERS['outlook-work'].compose, PROVIDERS.outlook.compose); // one implementation, so they cannot drift apart
 });
 
 test('only Gmail has a feed, which is what lets it sleep', () => {
@@ -91,10 +90,32 @@ test('classifyUrl: what does not depend on the provider', () => {
     assert.equal(classifyUrl('', p), 'blank');
     assert.equal(classifyUrl(undefined, p), 'blank');
     assert.equal(classifyUrl('mailto:a@b.com?subject=hi', p), 'mailto');
-    assert.equal(classifyUrl('javascript:alert(1)', p), 'external');
-    assert.equal(classifyUrl('file:///C:/Windows/win.ini', p), 'external');
+    assert.equal(classifyUrl('file:///example.txt', p), 'blocked');
+    assert.equal(classifyUrl('example:document', p), 'blocked');
   }
   assert.equal(classifyUrl('https://mail.google.com/mail/u/0/'), 'app'); // no provider given: Gmail
+  assert.equal(classifyUrl('http://mail.google.com/mail/u/0/'), 'external');
+  assert.equal(classifyUrl('https://mail.google.com:444/mail/u/0/'), 'external');
+});
+
+test('compose: work Outlook starts on the work service and honors the signed-in mail origin', () => {
+  const { compose } = PROVIDERS['outlook-work'];
+  const mailto = 'mailto:recipient@example.org';
+  assert.equal(new URL(compose(mailto)).host, 'outlook.office.com');
+  assert.equal(new URL(compose(mailto, 'login.microsoftonline.com')).host, 'outlook.office.com');
+  assert.equal(new URL(compose(mailto, 'outlook.office365.com')).host, 'outlook.office365.com');
+});
+
+test('Gmail wake, feed and compose all use the selected mailbox and Inbox counts require its Inbox route', () => {
+  const gmail = PROVIDERS.gmail;
+  const inbox = 'https://mail.google.com/mail/u/1/#inbox';
+  const slot = gmail.mailboxFromUrl(inbox);
+  assert.equal(slot, '1');
+  assert.equal(new URL(gmail.startForMailbox(slot)).searchParams.get('continue'), inbox.split('#')[0]);
+  assert.equal(new URL(gmail.feedForMailbox(slot)).pathname, '/mail/u/1/feed/atom');
+  assert.equal(new URL(gmail.compose('mailto:recipient@example.org', null, slot)).pathname, '/mail/u/1/');
+  assert.equal(gmail.inbox('Inbox - Quarterly discussion - test@example.org - Gmail', inbox + '/thread'), null);
+  assert.equal(gmail.inbox('Inbox (3) - test@example.org - Gmail', inbox).count, 3);
 });
 
 test('compose: Outlook builds a compose link for the kind of account that is signed in', () => {
@@ -122,7 +143,7 @@ test('compose: Gmail, and the providers without a compose link', () => {
 });
 
 test('each provider parses the unread count out of its own titles', () => {
-  assert.equal(PROVIDERS.gmail.inbox('Inbox (216,447) - someone@gmail.com - Gmail').count, 216447);
+  assert.equal(PROVIDERS.gmail.inbox('Inbox (216,447) - test@example.org - Gmail', PROVIDERS.gmail.urlForMailbox()).count, 216447);
   assert.deepEqual(PROVIDERS.outlook.inbox('Inbox (3) - someone@outlook.com - Outlook'), { count: 3, email: 'someone@outlook.com' });
   assert.equal(PROVIDERS.yahoo.inbox('(3) Inbox - Yahoo Mail').count, 3);
   assert.equal(PROVIDERS.aol.inbox('Inbox (3) - AOL Mail').count, 3);

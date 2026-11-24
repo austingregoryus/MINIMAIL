@@ -64,14 +64,15 @@ function checklist(tag) {
 // loudly if the process is still alive afterwards: a leftover process holding
 // the single-instance lock would make the next launch appear to do nothing.
 async function quitLikeAUser(target, suite) {
+  suite.check('every window but the main one is closed', BrowserWindow.getAllWindows().length === 1, windowList().join(' | '));
   const failed = suite.done() ? 1 : 0;
   const watchdog = setTimeout(() => {
     console.log('[exp] FAIL  the process is still running 8s after the window was closed');
     process.exit(3);
   }, 8000);
-  suite.check('every window but the main one is closed', BrowserWindow.getAllWindows().length === 1, windowList().join(' | '));
+  const quitting = new Promise((resolve) => app.once('will-quit', resolve));
   target.win.close();
-  await new Promise((resolve) => app.once('will-quit', resolve)); // if shutdown hangs this never settles; the watchdog reports it
+  await quitting;
   clearTimeout(watchdog);
   app.exit(failed);
 }
@@ -124,6 +125,10 @@ async function setupLab(target) {
           '</feed>',
       );
     }
+    if (req.url === '/redirect-to-inbox' || req.url === '/redirect-away') {
+      res.writeHead(302, { location: req.url === '/redirect-to-inbox' ? '/inbox' : 'https://outside.example.test/redirect' });
+      return res.end();
+    }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
     res.end(html);
   });
@@ -132,7 +137,7 @@ async function setupLab(target) {
   lab.url = (route, query) => `${lab.base}/${route}${query || ''}`;
   lab.close = () => new Promise((resolve) => server.close(resolve));
 
-  const shared = { mailHosts: ['127.0.0.1'], hosts: ['127.0.0.1'], inbox: parseWebmailTitle, color: '#2bb673' };
+  const shared = { mailHosts: ['127.0.0.1'], hosts: ['127.0.0.1'], testOrigin: lab.base, inbox: parseWebmailTitle, color: '#2bb673' };
   Object.assign(target.PROVIDERS, {
     local: {
       ...shared,
@@ -277,6 +282,10 @@ async function autotest(target) {
     await show(fake({ label: 'Proton Mail', provider: 'proton' }));
     let a = await avatarOf('Proton Mail');
     check('a freshly added Proton account shows the Proton mark as its avatar', a && a.filledByMark && a.badge === null, JSON.stringify(a));
+    await run("document.querySelector('.acct').focus()");
+    await show({ ...fake({ label: 'Proton Mail', provider: 'proton' }), count: 3 });
+    check('an unread update keeps focus on the same account button', await run("document.activeElement === document.querySelector('.acct')"));
+    check('the hidden download toast cannot take focus', await run("document.getElementById('dl-open').focus(); document.activeElement.id !== 'dl-open'"));
 
     await show(fake({ label: 'example@proton.me', provider: 'proton' })); // the usual Proton case: address known, never a photo
     a = await avatarOf('example@proton.me');
@@ -411,6 +420,10 @@ async function experiment(target) {
     const contents = fs.readFileSync(path.join(dir, 'minimail-test-c (1).txt'), 'utf8');
     check('…and both files have real contents', contents.includes('minimail-test-c.txt'), JSON.stringify(contents));
     check('no download shell windows are left behind', BrowserWindow.getAllWindows().length === 1, windowList().join(' | '));
+    if (process.platform === 'win32') {
+      await wc.executeJavaScript('anchorBlob("minimail-case.txt"); anchorBlob("MINIMAIL-CASE.TXT")');
+      check('case variants use separate download paths on Windows', await until(() => files().filter((file) => /^minimail-case.*\.txt$/i.test(file)).length === 2));
+    }
 
     // --- popups and links -------------------------------------------------------------------
     const blank = await wc.executeJavaScript('blankPopup()');
@@ -423,6 +436,10 @@ async function experiment(target) {
     check('a link outside the service goes to the browser, and the page stays put', wc.getURL().endsWith('/start') && opened.includes('https://outside.example.test/article'), `${wc.getURL()} | opened: ${opened.join(', ')}`);
     await wc.executeJavaScript(`location.href = ${JSON.stringify(lab.url('inbox'))}`);
     await until(() => onPage(wc) && wc.getURL().endsWith('/inbox'));
+    await wc.loadURL(lab.url('redirect-to-inbox'));
+    check('a server redirect within the service stays in the account', wc.getURL() === lab.url('inbox'));
+    await wc.loadURL(lab.url('redirect-away')).catch(() => {});
+    check('an off-provider server redirect is blocked without launching the browser', wc.getURL() === lab.url('inbox') && opened.length === 1);
     check('a link inside the service stays in the account view', wc.getURL().endsWith('/inbox'), wc.getURL());
 
     // --- unread count and new mail from the page title (Outlook, Yahoo, Proton) --------------
@@ -567,9 +584,9 @@ async function experiment(target) {
     target.switchTo(id);
     wc.focus();
     const start = target.settings.sidebarCollapsed;
-    const pressSidebarShortcut = async () => {
-      wc.sendInputEvent({ type: 'keyDown', keyCode: 'B', modifiers: ['control', 'shift'] });
-      wc.sendInputEvent({ type: 'keyUp', keyCode: 'B', modifiers: ['control', 'shift'] });
+    const pressSidebarShortcut = async (source = wc) => {
+      source.sendInputEvent({ type: 'keyDown', keyCode: 'B', modifiers: ['control', 'shift'] });
+      source.sendInputEvent({ type: 'keyUp', keyCode: 'B', modifiers: ['control', 'shift'] });
       await sleep(400);
     };
     const clickAt = async (selector) => {
@@ -604,8 +621,12 @@ async function experiment(target) {
     await wc.executeJavaScript("document.activeElement.blur()");
     await clickAt('#heading');
     await pressSidebarShortcut();
-    check('Ctrl+Shift+B outside a text field toggles the sidebar', target.settings.sidebarCollapsed !== start, 'focused: ' + JSON.stringify(await focused()));
-    await pressSidebarShortcut();
+    check('Ctrl+Shift+B stays with the mail page outside a text field too', target.settings.sidebarCollapsed === start);
+    const shellWc = target.win.webContents;
+    shellWc.focus();
+    await pressSidebarShortcut(shellWc);
+    check('Ctrl+Shift+B in the Minimail shell toggles the sidebar', target.settings.sidebarCollapsed !== start);
+    await pressSidebarShortcut(shellWc);
     check('…and toggles back', target.settings.sidebarCollapsed === start);
 
     // --- a service with a feed (the Gmail path) ---------------------------------------------
@@ -640,6 +661,11 @@ async function experiment(target) {
     check('switching to it reloads it', !!woken.view && woken.loading === true);
     await sleep(4000);
     check('…and clears the loading state once the page is up', woken.loading === false);
+    await setTitle(woken.view.webContents, 'Inbox (7) - Local Mail');
+    target.switchTo(id);
+    target.sleepView(feedId);
+    const stale = await account(feedId);
+    check('the last Inbox count is marked stale when its page unloads', stale.count === 7 && stale.countStale && stale.asleep);
 
     // --- dozing: a service with no feed, unloaded and checked out of sight (a switch) ---------
     const shell = (code) => target.win.webContents.executeJavaScript(code);
@@ -661,8 +687,10 @@ async function experiment(target) {
     check('…then comes back out of sight to look for new mail', protonRec().checking && !!midCheck && !inWindow(midCheck), JSON.stringify(listed));
     check('…counting as unloaded the while (there is nothing to click away from)', listed.asleep === true && listed.loading === false, JSON.stringify(listed));
     await midCheck.webContents.executeJavaScript('blankPopup()'); // nobody is looking at this page: it may not put a window on screen
+    await midCheck.webContents.executeJavaScript("location.href = 'https://outside.example.test/check'");
     await sleep(900);
     check('…and it may not open windows of its own', BrowserWindow.getAllWindows().length === 1, windowList().join(' | '));
+    check('…and it may not open the browser either', opened.length === 1);
     const beforeCheck = toastsFor(protonId).length;
     await setTitle(midCheck.webContents, '(5) Inbox | someone@proton.me | Proton Mail');
     const sawRise = () => toastsFor(protonId).length > beforeCheck && JSON.stringify(toastsFor(protonId).slice(beforeCheck)) === JSON.stringify(['5 new messages']);
@@ -693,7 +721,7 @@ async function experiment(target) {
     target.switchTo(id);
     await until(() => !protonRec().view); // in the background: unloaded again
     await setPref('dozeOthers', false);
-    check('turning "doze" off brings back what it had unloaded', !!protonRec().view && !protonRec().checking && inWindow(protonRec().view), JSON.stringify(await account(protonId)));
+    check('turning "doze" off brings back what it had unloaded without covering the active account', !!protonRec().view && !protonRec().checking && inWindow(protonRec().view) && !protonRec().view.getVisible(), JSON.stringify(await account(protonId)));
 
     // A zero seen only in passing: the page could not be read long enough to be
     // sure, so the old count stands — and the next rise is counted from it.
@@ -775,6 +803,10 @@ async function experiment(target) {
     const gmailWc = target.views.get(gmailId).view.webContents;
     await until(() => onPage(gmailWc));
     await gmailWc.executeJavaScript("const box = document.createElement('div'); box.id = 'compose-box'; box.setAttribute('g_editable', 'true'); document.body.appendChild(box)");
+    target.switchTo(id);
+    await sleep(1800);
+    check('background auto-sleep also leaves an open draft alone', target.views.get(gmailId).view?.webContents === gmailWc);
+    target.switchTo(gmailId);
     await seen(false);
     await sleep(1800);
     check('not while the page has a compose box open', !!target.views.get(gmailId).view);
@@ -839,7 +871,7 @@ async function shot(target) {
 }
 
 // ---------------------------------------------------------------------------
-// --probe (the real profile)
+// --probe (an explicitly selected profile copy)
 // ---------------------------------------------------------------------------
 
 // Runs against the REAL profile, unlike the modes above: reports what the mail
@@ -848,41 +880,37 @@ async function shot(target) {
 // draft). It loads the user's own account pages, so say so before running it.
 async function probe(target) {
   await sleep(16000); // accounts loading, first feed poll, first avatar probe
-  for (const acct of target.settings.accounts) {
+  for (const [index, acct] of target.settings.accounts.entries()) {
     const rec = target.views.get(acct.id);
     if (!rec) continue;
     const size = acct.avatar ? nativeImage.createFromDataURL(acct.avatar).getSize() : null;
     console.log(
-      `[probe] ${acct.label} [${acct.provider || 'gmail'}]: feed=${rec.feedState} feedCount=${rec.feedCount} inboxTitleCount=${rec.titleCount} shown=${rec.count} ` +
+      `[probe] account ${index + 1} [${acct.provider || 'gmail'}]: feed=${rec.feedState} feedCount=${rec.feedCount} inboxTitleCount=${rec.titleCount} shown=${rec.count} ` +
         `view=${rec.view ? 'loaded' : 'unloaded'} host=${rec.host} avatar=${size ? size.width + 'x' + size.height : 'none'}`,
     );
-    if (acct.avatar && process.env.PROBE_AVATAR_DIR) {
-      fs.mkdirSync(process.env.PROBE_AVATAR_DIR, { recursive: true });
-      const file = path.join(process.env.PROBE_AVATAR_DIR, acct.label.replace(/[^a-z0-9@.-]/gi, '_') + '.png');
-      fs.writeFileSync(file, nativeImage.createFromDataURL(acct.avatar).toPNG());
-      console.log('[probe]   avatar written to ' + file);
-    }
   }
 
   // Any signed-in Gmail account will do; the active one may be signed out.
-  const [id, rec] = [...target.views].find(([, r]) => r.feedState === 'ok') || [];
+  const [id] = [...target.views].find(([, r]) => r.feedState === 'ok') || [];
   if (!id) {
     console.log('[probe] no signed-in Gmail account — start URL and compose checks skipped');
     return app.exit(0);
   }
   const ses = session.fromPartition('persist:' + id);
+  const gmail = target.PROVIDERS.gmail;
+  const slot = gmail.mailboxFromUrl(target.views.get(id).view?.webContents.getURL()) || target.settings.accounts.find((acct) => acct.id === id)?.mailboxSlot || '0';
   const start = new BrowserWindow({ show: false, webPreferences: { session: ses } });
-  start.loadURL(target.PROVIDERS.gmail.start).catch(() => {});
+  start.loadURL(gmail.startForMailbox(slot)).catch(() => {});
   await sleep(9000);
-  console.log('[probe] signed-in start URL -> ' + start.webContents.getURL().slice(0, 110) + '  |  ' + start.webContents.getTitle().slice(0, 50));
+  console.log('[probe] start matched the expected mailbox: ' + (gmail.mailboxFromUrl(start.webContents.getURL()) === slot));
   start.destroy();
 
   const hidden = new BrowserWindow({ show: false, webPreferences: { session: ses } });
-  await hidden.loadURL('https://mail.google.com/mail/u/0/?view=cm&fs=1&tf=1').catch(() => {});
+  await hidden.loadURL(gmail.compose('mailto:', null, slot)).catch(() => {});
   await sleep(8000);
   const info = await hidden.webContents
-    .executeJavaScript(`({ url: location.href.slice(0, 110), title: document.title, body: !!document.querySelector('[g_editable="true"]') })`)
-    .catch((err) => ({ error: String(err) }));
+    .executeJavaScript(`!!document.querySelector('[g_editable="true"]')`)
+    .catch(() => false);
   console.log('[probe] signed-in compose -> ' + JSON.stringify(info));
   hidden.destroy();
   app.exit(0);

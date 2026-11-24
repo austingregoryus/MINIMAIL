@@ -8,11 +8,10 @@
 //                                 without a feed reload out of sight, be read and close again
 //   MINIMAIL_BENCH_PLAN=linger    after an account unloads, how soon its memory is really back
 //   MINIMAIL_BENCH_PLAN=shot      the main window as a picture for the README: needs
-//                                 MINIMAIL_SHOT_OUT, and shows the window (inactive) for ~2s
+//                                 MINIMAIL_SHOT_OUT and captures the window offscreen
 //   MINIMAIL_BENCH_SHOW=1         also measure with the window shown (inactive) at the end
 //   MINIMAIL_BENCH_SWITCHES=...   Chromium switches to try (see main.js)
 //   MINIMAIL_BENCH_BLOCK=a,b      also refuse these hosts (to see what a page costs without them)
-//   MINIMAIL_BENCH_SHOT=<dir>     write a screenshot of the lower left of each Gmail page there
 //
 // Unlike the offline modes this loads the user's real, signed-in mail pages, so
 // say so before running it. It is built so that it cannot disturb anything:
@@ -28,33 +27,27 @@
 // comparable. Two numbers per process: the private working set (what Task
 // Manager's "Memory" column shows, and what the machine can really get back)
 // and the commit charge (everything the process holds, resident or pushed out).
-const { app, session, nativeImage, screen, desktopCapturer } = require('electron');
+const { app, session, nativeImage, screen } = require('electron');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const SIGNIN_HOSTS = ['accounts.google.com', 'account.proton.me', 'login.proton.me', 'login.live.com', 'account.live.com', 'login.yahoo.com', 'login.aol.com'];
+const EXTRA_SIGNIN_HOSTS = ['login.proton.me', 'account.live.com'];
 const MB = 1024 * 1024;
 const providerOf = (acct) => acct.provider || 'gmail';
 
 let blockedSignIns = [];
 let blockedExtra = 0;
-function blockHosts(ses, hosts, record) {
-  ses.webRequest.onBeforeRequest({ urls: hosts.map((h) => `*://${h}/*`) }, (details, callback) => {
-    record(details.url);
+function blockHosts(ses, signIns, extra) {
+  const urls = [...new Set([...signIns, ...extra])].map((host) => `*://${host}/*`);
+  ses.webRequest.onBeforeRequest({ urls }, (details, callback) => {
+    const host = new URL(details.url).hostname;
+    if (signIns.has(host)) blockedSignIns.push(host);
+    else blockedExtra++;
     callback({ cancel: true });
   });
 }
-// What was refused: host and path only, never the query, which can carry tokens.
-const where = (url) => {
-  try {
-    return new URL(url).host + new URL(url).pathname.slice(0, 60);
-  } catch {
-    return '(unparsed url)';
-  }
-};
-
 // Private working set per pid. Node cannot read it, so the perf counters are
 // asked through PowerShell; one call per sample.
 function privateWorkingSet(pids) {
@@ -176,21 +169,14 @@ async function protocol(wc, method, params) {
   }
 }
 
-async function shot(wc, file) {
-  // The lower left of a Gmail page: where its Meet box sits. CSS pixels.
-  const res = await protocol(wc, 'Page.captureScreenshot', { format: 'png', clip: { x: 0, y: 500, width: 260, height: 300, scale: 1 } });
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, Buffer.from(res.data, 'base64'));
-}
-
 // The two unloading switches, on short timers, on the real pages: what they
 // free, and — the point — what the service without a feed reports when it is
 // loaded out of sight, read and closed. Proton Mail shows "Inbox | …" (no
 // number) before "(1200) Inbox | …" on every load; none of that may come out
 // as new mail.
 async function dozeTimeline(target, accounts, at) {
-  const toasts = [];
-  target.setNotifier((_id, _title, text) => toasts.push(text));
+  let toasts = 0;
+  target.setNotifier(() => toasts++);
   Object.assign(process.env, { MINIMAIL_SLEEP_MS: '20000', MINIMAIL_DOZE_MS: '9000' });
   target.settings.sleepAccounts = true;
   target.settings.dozeOthers = true;
@@ -248,7 +234,7 @@ async function lingerTimeline(target, accounts, at) {
 // bar, sidebar — shows made-up account names, counts and no photos. The mail
 // page is pixelated wherever mail is, and those places are read from the
 // page's own layout rather than looked for by eye, so nobody has to see the
-// mail to hide it. The window is shown, without focus, for about two seconds.
+// mail to hide it. Capture remains offscreen.
 // Invented names for Minimail's own chrome, on domains that are reserved for
 // examples and so cannot be anybody's address.
 const DEMO_LABELS = ['alex@example.com', 'sam@example.org', 'riley@example.net', 'casey@example.com', 'jordan@example.org', 'taylor@example.net'];
@@ -357,21 +343,6 @@ async function retrying(what, tries = 6) {
   throw last;
 }
 
-// The window's own content area, as Windows has it on screen — which works
-// whether or not it is covered.
-async function captureWindow(win) {
-  const bounds = win.getBounds();
-  const content = win.getContentBounds();
-  const scale = screen.getDisplayMatching(bounds).scaleFactor;
-  const sources = await desktopCapturer.getSources({ types: ['window'], thumbnailSize: { width: Math.round(bounds.width * scale), height: Math.round(bounds.height * scale) } });
-  const handle = win.getNativeWindowHandle().readBigUInt64LE().toString();
-  const mine = sources.find((s) => s.id === `window:${handle}:0`);
-  if (!mine) throw new Error('the window is not among those that can be captured');
-  const per = mine.thumbnail.getSize().width / bounds.width; // pixels per point
-  const crop = (v) => Math.round(v * per);
-  return mine.thumbnail.crop({ x: crop(content.x - bounds.x), y: crop(content.y - bounds.y), width: crop(content.width), height: crop(content.height) });
-}
-
 async function shotTimeline(target, accounts) {
   const out = process.env.MINIMAIL_SHOT_OUT;
   if (!out) throw new Error('set MINIMAIL_SHOT_OUT to the PNG to write');
@@ -403,29 +374,20 @@ async function shotTimeline(target, accounts) {
   // For when a region is not where it was meant to be: where each one is (never what is in it).
   if (process.env.MINIMAIL_BENCH_DEBUG) console.log(`[bench] page ${zones.vw}x${zones.vh}; hidden regions: ${JSON.stringify(zones.zones.map((z) => [z.x, z.y, z.w, z.h].map(Math.round)))}`);
 
-  win.showInactive(); // on screen, but focus stays where the user left it
-  await sleep(2000); // painted
-  let picture;
-  let how = 'page by page';
-  try {
-    const chrome = await retrying(() => win.webContents.capturePage());
-    const mail = await retrying(() => view.webContents.capturePage());
-    const per = mail.getSize().width / zones.vw;
-    picture = composite(chrome, mail, Math.round(at.x * per), Math.round(at.y * per));
-  } catch (err) {
-    // A page that is covered is not painting, and will not be captured: take
-    // the window as a whole instead.
-    how = `the window as a whole (a page would not be captured: ${String(err).slice(0, 60)})`;
-    picture = await captureWindow(win);
-  }
-  win.hide();
-
-  const per = picture.getSize().width / win.getContentSize()[0]; // pixels per point
-  const rects = zones.zones.map((z) => ({ x: (z.x + at.x) * per, y: (z.y + at.y) * per, w: z.w * per, h: z.h * per }));
-  picture = pixelate(picture, rects, Math.max(4, Math.round(PIXEL * per)));
+  const capture = (wc) => retrying(async () => {
+    const image = await wc.capturePage(undefined, { stayHidden: true });
+    if (image.isEmpty()) throw new Error('Offscreen capture returned an empty image');
+    return image;
+  });
+  const chrome = await capture(win.webContents);
+  const mail = await capture(view.webContents);
+  const per = mail.getSize().width / zones.vw;
+  const rects = zones.zones.map((z) => ({ x: z.x * per, y: z.y * per, w: z.w * per, h: z.h * per }));
+  const redacted = pixelate(mail, rects, Math.max(4, Math.round(PIXEL * per)));
+  const picture = composite(chrome, redacted, Math.round(at.x * per), Math.round(at.y * per));
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, picture.toPNG());
-  console.log(`[bench] saved ${out} (${picture.getSize().width}x${picture.getSize().height}); ${rects.length} region(s) of the mail page pixelated; captured ${how}`);
+  console.log(`[bench] saved ${out} (${picture.getSize().width}x${picture.getSize().height}); ${rects.length} region(s) of the mail page pixelated`);
 }
 
 async function measure(target) {
@@ -438,17 +400,19 @@ async function measure(target) {
   target.settings.sleepAccounts = false; // measure pages that are loaded and left alone
 
   const accounts = target.settings.accounts;
-  const extra = (process.env.MINIMAIL_BENCH_BLOCK || '').split(',').map((h) => h.trim()).filter(Boolean);
+  const extra = (process.env.MINIMAIL_BENCH_BLOCK || '').split(',').map((h) => h.trim().toLowerCase()).filter((h) => /^[a-z0-9.-]+$/.test(h));
+  const signIns = new Set(EXTRA_SIGNIN_HOSTS);
+  for (const provider of Object.values(target.PROVIDERS)) {
+    for (const host of provider.hosts) if (!provider.mailHosts.includes(host)) signIns.add(host);
+  }
   for (const acct of accounts) {
     const ses = session.fromPartition('persist:' + acct.id);
-    blockHosts(ses, SIGNIN_HOSTS, (url) => blockedSignIns.push(where(url)));
-    if (extra.length) blockHosts(ses, extra, () => blockedExtra++);
+    blockHosts(ses, signIns, extra);
   }
-  blockHosts(session.defaultSession, SIGNIN_HOSTS, (url) => blockedSignIns.push(where(url)));
+  blockHosts(session.defaultSession, signIns, extra);
   // Start at the mail app itself. Signed in, it loads; signed out, it redirects
   // to a sign-in host — which is blocked, so that is where the page stops.
-  target.PROVIDERS.gmail.start = 'https://mail.google.com/mail/u/0/';
-  target.PROVIDERS.proton.start = 'https://mail.proton.me/';
+  target.PROVIDERS.gmail.startForMailbox = target.PROVIDERS.gmail.urlForMailbox;
 
   const plan = process.env.MINIMAIL_BENCH_PLAN || 'purge';
   console.log(`[bench] electron ${process.versions.electron}, chromium ${process.versions.chrome}, ${accounts.length} account(s), plan ${plan}`);
@@ -499,18 +463,6 @@ async function measure(target) {
     for (const s of [90, 120]) samples.push(await at(s, 'hidden'));
   }
 
-  if (process.env.MINIMAIL_BENCH_SHOT) {
-    for (const [i, acct] of accounts.entries()) {
-      const rec = target.views.get(acct.id);
-      if (providerOf(acct) !== 'gmail' || !rec || !rec.view) continue;
-      const file = path.join(process.env.MINIMAIL_BENCH_SHOT, `gmail${(accounts.slice(0, i).filter((a) => providerOf(a) === 'gmail').length) + 1}.png`);
-      await shot(rec.view.webContents, file).then(
-        () => console.log(`[bench] screenshot: ${file}`),
-        (err) => console.log(`[bench] screenshot not taken: ${String(err).slice(0, 160)}`),
-      );
-    }
-  }
-
   const pages = accounts.map((a) => target.views.get(a.id).view).filter(Boolean).map((v) => v.webContents);
   if (plan === 'purge' && pages.length) {
     // 1. A full garbage collection of one page only.
@@ -554,8 +506,7 @@ async function measure(target) {
         host = '(no page)';
       }
     }
-    const title = wc ? wc.getTitle().replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, '<address>').slice(0, 60) : '';
-    console.log(`[bench] ${accountKey(target, i)}: ${host}  inboxSeen=${!!(rec && rec.signedIn)}  "${title}"`);
+    console.log(`[bench] ${accountKey(target, i)}: ${host}  inboxSeen=${!!(rec && rec.signedIn)}`);
   }
   for (const [what, list] of [['sign-in', [...new Set(blockedSignIns)]], ['extra', [`${blockedExtra} request(s)`]]]) {
     if (list.length) console.log(`[bench] refused ${what} host requests: ${list.slice(0, 8).join(' | ')}`);

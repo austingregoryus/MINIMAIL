@@ -92,15 +92,15 @@ The installer installs for the current user only and is unsigned, so Windows Sma
 ## How it works
 
 - **Accounts.** One shell window (title bar and sidebar) with a `WebContentsView` per account, each in its own `persist:` session partition, so sign-ins never mix. The active account loads at launch; the others load 3 seconds later unless *Prefetch background accounts* is off, in which case they load when first clicked. Click **+** to choose a service.
-- **Unread counts.** While an Inbox is on screen, the count is read from the page title and matches what the service itself shows. Gmail is additionally polled once a minute, page open or not, and mail that arrives while no Inbox is showing is added to its number.
-- **Notifications.** Gmail: a thread that was not in the previous poll. The others: a rise in the Inbox count, ignoring rises while a page is still filling in and counts that dip and bounce back. Clicking a pop-up switches to that account. The services' own web notifications are turned off, so nothing arrives twice.
+- **Unread counts.** The app uses the count from the Inbox title when available. For Gmail, a `~` marks a last known count when the Inbox is closed or on another page. The feed keeps checking for new mail in the background.
+- **Notifications.** Gmail compares unread thread IDs against recent feed history. Other providers use a confirmed rise in the Inbox count. Clicking a pop-up switches to that account. Minimail handles notifications for each service.
 - **Per account.** Each account has three switches: *Unread count* (the red number on its avatar), *Sound* and *Pop-up*. With the pop-up off but sound on, Minimail plays a short chime of its own.
 - **Mute.** The speaker under the gear silences sound and pop-ups for every account at once, for 15 minutes, 1 hour, 4 hours, or until you turn it back on. It survives a restart, and a timed mute runs out on its own. Unread counts keep counting.
-- **Auto-sleep.** A background Gmail account unloads after 10 minutes; counts and notifications keep working, and clicking it reloads it.
+- **Auto-sleep.** A background Gmail account can unload after 10 minutes. An open draft or pop-out keeps it loaded. Mail notifications continue, and selecting the account reloads it.
 - **Also unload the other services.** Proton, Outlook, Yahoo and AOL accounts unload like Gmail ones do, and since nothing can check them with their page closed, their page is loaded out of sight every 5 minutes instead: not in the window, read once its count has settled, closed again. A rise is real, and so is a drop, except a drop to zero, which has to hold for a while after the page finished loading, because these pages report zero while starting up. A check that lands on a sign-in page is never repeated: that is what puts passkey prompts on screen. It waits for the account to be opened.
 - **Also unload the account on screen when away.** Chromium reports when a window has gone out of sight — minimized, or fully covered — through the page's visibility, the same signal it throttles pages on. After 10 minutes of that, the Gmail account being shown unloads too, and comes back when the window is seen again. Only a service with a feed can be, so that nothing stops notifying, and never while something is in progress: a compose box in the page, a focused text field, or a window of that account open.
-- **Links.** Each service's own site and sign-in flow stay in the app. Everything else opens in your default browser. Ctrl+click opens a background browser tab.
-- **Downloads.** Attachments are saved straight to your `Downloads` folder, and a toast in the title bar offers *Open* and *Folder*. Two files with the same name never overwrite each other.
+- **Links.** Approved provider pages stay in Minimail. External HTTP and HTTPS links go to the default browser, which decides how to open them. Navigation redirects are checked against the provider's host list. Camera and microphone requests from supported mail pages ask for approval.
+- **Downloads.** Attachments are saved to your `Downloads` folder. A toast offers *Open* and *Folder* and reports failures. Concurrent downloads with the same name get separate paths.
 - **Popups.** A page's own windows (pop-out compose, print) open as child windows in the same session.
 - **Avatars.** Gmail accounts show your Google profile photo, cached in `settings.json`. Other accounts show the first letter of their address. Until an address is known, the avatar is the service's mark (Gmail, Proton Mail) or its initial.
 - **Service badge.** A small badge on the lower-left of each avatar says which service the account is on: the Gmail or Proton Mail outline in the service's colour, or the service's initial where it has no outline.
@@ -111,7 +111,7 @@ The installer installs for the current user only and is unsigned, so Windows Sma
 | Keys | Action |
 | --- | --- |
 | `Ctrl+1` … `Ctrl+9` | Switch to account N |
-| `Ctrl+Shift+B` | Hide or show the sidebar — a thin `›` strip stays clickable when hidden. Inside a text field the page keeps it (Gmail's bold, add Bcc) |
+| `Ctrl+Shift+B` | Hide or show the sidebar when Minimail's controls have focus. Mail pages keep their own shortcuts |
 | `F5` / `Ctrl+R` | Reload the mail window that has focus, or the active account |
 | `F12` / `Ctrl+Shift+I` | DevTools for the focused view |
 
@@ -148,7 +148,7 @@ A missing `notify` switch means "on". `mutedUntil` is when the mute ends, in mil
 
 - Minimail shows each service's own website, so its look and its speed are that website's.
 - Accounts of services other than Gmail are shown as "Outlook", "Yahoo Mail" and so on until an address shows up in their page title. Accounts can't be renamed.
-- The unread count is the one the service shows for the Inbox. Mail read on another device isn't subtracted until that account's Inbox is next on screen.
+- The Gmail count marked `~` refreshes when the account next shows its Inbox.
 - Gmail's feed reports its own total, which counts differently and can be far higher than the Inbox number. It is only shown for a Gmail account that has not displayed its Inbox since the app started.
 - Reading the count from the title needs the service's interface language to be English ("Inbox").
 - New mail that arrives while you have a conversation open is notified when you go back to the Inbox.
@@ -183,7 +183,7 @@ npm run experiment  # end to end: downloads, links, counts, toasts, compose, unl
 
 The last two are **offline**, and it is enforced rather than intended: they run in a throwaway profile against services that exist only on `127.0.0.1`, and cancel and report any request that tries to leave the machine.
 
-Two more modes load your real mail pages, so say so before running either: `--probe` (reports on the signed-in profile) and `--bench` (measures memory; on a copy of the profile only, in a window that is never shown, with every sign-in host refused). A third, `--online`, loads a real sign-in page, which puts passkey prompts on the screen; it refuses to run without `MINIMAIL_ALLOW_SIGNIN_PAGES=1`.
+Diagnostics are available when running from source. `--probe` and `--bench` load mail pages from a separate profile copy. Both require `MINIMAIL_ALLOW_ACCOUNT_PAGES=1`. Set `MINIMAIL_PROBE_PROFILE` for `--probe` or `MINIMAIL_BENCH_PROFILE` for `--bench`. The benchmark keeps its window hidden by default and blocks known sign-in hosts. `--online` can show real sign-in and passkey prompts and requires `MINIMAIL_ALLOW_SIGNIN_PAGES=1`.
 
 ### Measuring memory
 
@@ -199,7 +199,7 @@ MINIMAIL_ALLOW_ACCOUNT_PAGES=1 MINIMAIL_BENCH_PROFILE=<a copy of the profile> np
 npm run banner      # docs/media/banner.png, from the app's own logo, wordmark and marks
 ```
 
-The screenshots are the app itself. `npx electron . --shot` renders the sidebar, or with `SHOT=settings` the Settings window, from `scripts/demo-settings.json`, whose account names are invented. The main window is `--bench` with `MINIMAIL_BENCH_PLAN=shot` and `MINIMAIL_SHOT_OUT=<png>`: invented names and counts in Minimail's own chrome, and the mail page pixelated wherever mail is.
+`npx electron . --shot` renders the sidebar with the synthetic accounts in `scripts/demo-settings.json`. Set `SHOT=settings` to capture Settings or `SHOT=welcome` to capture the welcome screen. Use synthetic fixtures for screenshots intended for publication. The benchmark's `shot` plan captures offscreen and may contain provider-specific content from the profile copy.
 
 ### Timing overrides, for tests
 
