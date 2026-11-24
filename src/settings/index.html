@@ -40,9 +40,25 @@
 <div class="row">
   <div>
     <div class="label">Auto-sleep background Gmail accounts</div>
-    <div class="hint">Unload Gmail accounts you haven&#8217;t used for 10 minutes to free memory. They keep checking for new mail; clicking one reloads it. Other services can only be checked while open, so they stay loaded.</div>
+    <div class="hint">Unload Gmail accounts you haven&#8217;t used for 10 minutes to free memory. They keep checking for new mail; clicking one reloads it. Other services can only be checked while open, so they stay loaded unless the switch below is on.</div>
   </div>
   <button class="toggle" id="p-sleepAccounts" type="button" aria-label="Auto-sleep background Gmail accounts"></button>
+</div>
+
+<div class="row">
+  <div>
+    <div class="label">Also unload Proton, Outlook, Yahoo and AOL accounts</div>
+    <div class="hint">They can only be checked while open, so instead of staying loaded they reload out of sight every 5 minutes to look for new mail. Their notifications can then be up to 5 minutes late, and they reload when you click them.</div>
+  </div>
+  <button class="toggle" id="p-dozeOthers" type="button" aria-label="Also unload Proton, Outlook, Yahoo and AOL accounts"></button>
+</div>
+
+<div class="row">
+  <div>
+    <div class="label">Also unload the account on screen when I&#8217;m away</div>
+    <div class="hint">Once the window has been minimized or fully covered for 10 minutes, unload the Gmail account it is showing as well. New mail is still notified; it reloads when you come back. Never while you have a compose open.</div>
+  </div>
+  <button class="toggle" id="p-sleepWhenAway" type="button" aria-label="Also unload the account on screen when I&#8217;m away"></button>
 </div>
 
 <div class="row">

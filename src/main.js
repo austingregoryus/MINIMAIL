@@ -14,10 +14,10 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const os = require('node:os');
 const { badgeImage, dotImage } = require('./badge');
-const { parseEmail, parseFeed, mergeFeed, unwrapGoogleRedirect, sanitizeFilename, formatCount, createRiseTracker, riseStep, MUTE_UNTIL_TURNED_OFF, isMuted, notificationPlan, withNotifyDefaults } = require('./parsers');
+const { parseEmail, parseFeed, mergeFeed, unwrapGoogleRedirect, sanitizeFilename, formatCount, createRiseTracker, riseStep, settleCheckIn, CHECKIN_ZERO_HOLD_MS, MUTE_UNTIL_TURNED_OFF, isMuted, notificationPlan, withNotifyDefaults } = require('./parsers');
 const { PROVIDERS, PROVIDER_ORDER, classifyUrl, accountColor } = require('./providers');
 
-const DIAGNOSTIC = ['--autotest', '--shot', '--experiment', '--online', '--probe'].find((flag) => process.argv.includes(flag));
+const DIAGNOSTIC = ['--autotest', '--shot', '--experiment', '--online', '--probe', '--bench'].find((flag) => process.argv.includes(flag));
 
 // The profile holds sign-ins, cookies and settings. Releases up to 0.3 were
 // called "Gmail Lite" and kept it in `gmail-lite`: move it along on the first
@@ -32,9 +32,30 @@ if (!DIAGNOSTIC) {
   }
   if (!fs.existsSync(dataDir) && fs.existsSync(legacyDataDir)) dataDir = legacyDataDir; // the move failed: keep using the old one
 }
+if (DIAGNOSTIC === '--bench') {
+  // The memory measurement rig runs on a copy of the profile, never the real one (see src/bench.js).
+  const copy = process.env.MINIMAIL_BENCH_PROFILE;
+  if (!copy || !fs.existsSync(copy) || path.resolve(copy) === path.resolve(dataDir)) {
+    console.log('[bench] not run: set MINIMAIL_BENCH_PROFILE to a copy of the profile (not the profile itself).');
+    process.exit(2);
+  }
+  dataDir = path.resolve(copy);
+}
 app.setPath('userData', dataDir);
 
-if (DIAGNOSTIC && DIAGNOSTIC !== '--probe') {
+// Chromium switches for the measurement rig, so one setting can be tried per
+// run without a code change: MINIMAIL_BENCH_SWITCHES="disable-features=A,B js-flags=--x".
+if (DIAGNOSTIC === '--bench' && process.env.MINIMAIL_BENCH_SWITCHES) {
+  for (const item of process.env.MINIMAIL_BENCH_SWITCHES.split(/\s+/).filter(Boolean)) {
+    const eq = item.indexOf('=');
+    const name = eq < 0 ? item : item.slice(0, eq);
+    const value = eq < 0 ? '' : item.slice(eq + 1);
+    const current = app.commandLine.getSwitchValue(name);
+    app.commandLine.appendSwitch(name, current && /features$/.test(name) ? `${current},${value}` : value);
+  }
+}
+
+if (DIAGNOSTIC && DIAGNOSTIC !== '--probe' && DIAGNOSTIC !== '--bench') {
   // Diagnostics run in their own profile so they never touch the real one.
   const dir = path.join(os.tmpdir(), 'minimail' + DIAGNOSTIC.replace('--', '-'));
   fs.rmSync(dir, { recursive: true, force: true }); // start every run from the same clean state
@@ -60,8 +81,19 @@ const SIDEBAR_W = 56;
 const COLLAPSED_W = 16; // thin strip that stays clickable when the sidebar is hidden
 const TITLEBAR_H = 40;
 const PREFETCH_DELAY_MS = 3000;
-// Background Gmail accounts unload their renderer after this long.
-const SLEEP_AFTER_MS = Number(process.env.MINIMAIL_SLEEP_MS) || 10 * 60 * 1000;
+// An account nobody has looked at for this long is unloaded (auto-sleep).
+const sleepDelay = () => Number(process.env.MINIMAIL_SLEEP_MS) || 10 * 60 * 1000;
+// A service that can only be checked while its page is open, and is set to
+// unload anyway ("dozing"), reloads out of sight this often to look for mail.
+const dozeDelay = () => Number(process.env.MINIMAIL_DOZE_MS) || 5 * 60 * 1000;
+const CHECK_FIRST_MS = 2000; // …except for one whose count has never been read: that one is checked straight away
+const AWAY_RECHECK_MS = 60000; // when the showing account could not be unloaded (something in progress), look again this soon
+// A page loaded out of sight is believed once its count has held this long,
+// after the page finished loading: pages report no count, or zero, while
+// starting up. A count of zero has to hold longer still (CHECKIN_ZERO_HOLD_MS).
+const settleDelay = () => Number(process.env.MINIMAIL_SETTLE_MS) || 2500;
+const zeroHold = () => Number(process.env.MINIMAIL_ZERO_MS) || CHECKIN_ZERO_HOLD_MS;
+const checkInLimit = () => Number(process.env.MINIMAIL_CHECKIN_MS) || 45000; // whatever happens, a check ends
 // Gmail's feed is polled this often, page open or not: it is what keeps counts
 // current when no Inbox is showing and what new-mail notifications come from.
 const pollInterval = () => Number(process.env.MINIMAIL_POLL_MS) || 60 * 1000;
@@ -108,6 +140,8 @@ let settings = {
   prefetchAccounts: true,
   showBadge: true,
   sleepAccounts: true,
+  sleepWhenAway: false, // also unload the account being shown, once the window has been out of sight for a while (Gmail only)
+  dozeOthers: false, // also unload services that have no feed, and reload them out of sight now and then to check
   launchOnStartup: false,
   mutedUntil: 0, // when the global mute ends (ms); MUTE_UNTIL_TURNED_OFF for "until I turn it back on"; 0 = not muted
 };
@@ -157,11 +191,13 @@ function saveSettings() {
 }
 
 function publicPrefs() {
-  const { showBadge, prefetchAccounts, sleepAccounts, sidebarCollapsed, launchOnStartup } = settings;
+  const { showBadge, prefetchAccounts, sleepAccounts, sleepWhenAway, dozeOthers, sidebarCollapsed, launchOnStartup } = settings;
   return {
     showBadge,
     prefetchAccounts,
     sleepAccounts,
+    sleepWhenAway,
+    dozeOthers,
     sidebarCollapsed,
     launchOnStartup,
     mutedUntil: isMuted(settings.mutedUntil) ? Number(settings.mutedUntil) : 0, // 0 = not muted
@@ -203,9 +239,11 @@ function accountsPayload() {
       showCount: !a.notify || a.notify.count !== false, // this account's "unread count" switch
       notify: a.notify || null, // { count, sound, banner } for the Settings window
       active: a.id === settings.activeId,
-      // No renderer right now: unloaded by auto-sleep, or never loaded (prefetch off).
-      asleep: !!rec && !rec.view,
-      loading: !!rec && rec.loading,
+      // No page of its own right now: unloaded by auto-sleep, or never loaded
+      // (prefetch off). A page that is only being read out of sight counts as
+      // unloaded too: it is gone in a moment.
+      asleep: !!rec && (!rec.view || rec.checking),
+      loading: !!rec && rec.loading && !rec.checking,
     };
   });
 }
@@ -461,6 +499,17 @@ function newRecord() {
     polling: false,
     repoll: null,
     lastCrash: 0,
+    // Dozing (a service that has no feed, set to unload anyway).
+    checking: false, // a page is loaded out of sight right now, being read
+    checkSeen: undefined, // the last count that page's title showed
+    checkTitleAt: 0, // when it last showed one
+    checkLoadedAt: 0, // when that page finished loading
+    checkTimer: null,
+    settleTimer: null,
+    checkPaused: false, // it turned out to be signed out: no more checks until it is opened
+    countKnown: false, // its count has been read at least once this session
+    everLoaded: false,
+    awayAsleep: false, // unloaded because the window was out of sight
   };
 }
 
@@ -499,6 +548,10 @@ function attachView(id) {
     if (rec) {
       rec.loading = false;
       rec.host = hostOf(wc.getURL());
+      if (rec.checking) {
+        rec.checkLoadedAt = Date.now();
+        armCheckSettle(id);
+      }
       pushAccounts();
     }
     if (providerOf(id).avatar) scheduleAvatarProbe(id);
@@ -518,11 +571,19 @@ function attachView(id) {
 
 function wakeView(id) {
   const rec = views.get(id);
-  if (!rec || rec.view || !win || win.isDestroyed()) return;
+  if (!rec || !win || win.isDestroyed()) return;
+  if (rec.view) {
+    if (rec.checking) keepCheckingPage(id); // it was loading out of sight a moment ago: the same page is now the account's own
+    return;
+  }
+  disarmCheckIn(id);
   rec.view = attachView(id);
   rec.loading = true;
   rec.signedIn = false;
   rec.rise = createRiseTracker(); // the first count this page reports is a baseline, not new mail
+  rec.awayAsleep = false;
+  rec.checkPaused = false;
+  rec.everLoaded = true;
   win.contentView.addChildView(rec.view);
   rec.view.setVisible(id === settings.activeId);
   layout();
@@ -530,40 +591,249 @@ function wakeView(id) {
   debug('[sleep]', acctLabel(id), 'loaded');
 }
 
-// Auto-sleep: a background Gmail account unloads its renderer after
-// SLEEP_AFTER_MS; its feed keeps counts and notifications going, and its
-// session stays on disk, so waking is instant and still signed in. Services
-// without a feed would go silent, so they are never unloaded.
-function armSleep(id) {
+function disarmSleep(id) {
   const rec = views.get(id);
-  if (!rec || !settings.sleepAccounts || !providerOf(id).feed || !rec.view || id === settings.activeId) return;
-  clearTimeout(rec.sleepTimer);
-  rec.sleepTimer = setTimeout(() => sleepView(id), SLEEP_AFTER_MS);
-}
-
-function sleepView(id) {
-  const rec = views.get(id);
-  if (!rec || !providerOf(id).feed || !rec.view || id === settings.activeId || !win || win.isDestroyed()) return;
+  if (!rec) return;
   clearTimeout(rec.sleepTimer);
   rec.sleepTimer = null;
-  win.contentView.removeChildView(rec.view);
+}
+
+// Auto-sleep: an account nobody has looked at for sleepDelay() unloads its
+// page. A service with a feed (Gmail) keeps counts and notifications going
+// without it, and its session stays on disk, so waking is instant and still
+// signed in. The others can only be watched while their page is open, so they
+// are unloaded only when "dozing" is on for them (below).
+// Idempotent: an account that already has a timer keeps it.
+function armSleep(id) {
+  const rec = views.get(id);
+  if (!rec || !rec.view || rec.checking || rec.sleepTimer) return;
+  if (!settings.sleepAccounts || id === settings.activeId || !win || win.isDestroyed()) return;
+  if (!providerOf(id).feed && !settings.dozeOthers) return; // nothing else would keep watching it
+  rec.sleepTimer = setTimeout(() => {
+    rec.sleepTimer = null;
+    sleepView(id);
+  }, sleepDelay());
+}
+
+function sleepView(id, opts = {}) {
+  const rec = views.get(id);
+  if (!rec || !rec.view || !win || win.isDestroyed()) return false;
+  if (id === settings.activeId && !opts.away) return false; // being looked at: only the away timer may unload it
+  if (!providerOf(id).feed && !settings.dozeOthers) return false; // nothing else would keep watching it
+  disarmSleep(id);
+  const showing = id === settings.activeId;
+  if (!rec.checking) win.contentView.removeChildView(rec.view);
   rec.view.webContents.close();
   rec.view = null;
-  log('[sleep]', acctLabel(id), 'unloaded');
+  if (showing) rec.awayAsleep = true;
+  log('[sleep]', acctLabel(id), showing ? 'unloaded — the window is out of sight' : 'unloaded');
+  reconcile();
   pushAccounts();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Dozing: a service with no feed, watched without keeping its page open
+// ---------------------------------------------------------------------------
+
+// Only Gmail can be checked with its page closed. With the switch on, the
+// others are unloaded like any other account, and instead their page is loaded
+// out of sight every dozeDelay(), read, and closed again. New mail shows up
+// then — which is why their notifications can be that late, and why this is a
+// switch. Idempotent, like armSleep.
+function armCheckIn(id) {
+  const rec = views.get(id);
+  if (!rec || rec.view || rec.checkTimer) return;
+  if (!settings.dozeOthers || !settings.sleepAccounts || rec.checkPaused || id === settings.activeId || !win || win.isDestroyed()) return;
+  if (providerOf(id).feed) return;
+  rec.checkTimer = setTimeout(() => {
+    rec.checkTimer = null;
+    checkIn(id);
+  }, rec.countKnown ? dozeDelay() : CHECK_FIRST_MS);
+}
+
+function disarmCheckIn(id) {
+  const rec = views.get(id);
+  if (!rec) return;
+  clearTimeout(rec.checkTimer);
+  rec.checkTimer = null;
+  if (!rec.checking) {
+    // A check in progress keeps its own timers: without them its page would never be closed.
+    clearTimeout(rec.settleTimer);
+    rec.settleTimer = null;
+  }
+}
+
+function checkIn(id) {
+  const rec = views.get(id);
+  if (!rec || rec.view || !settings.dozeOthers || !settings.sleepAccounts || id === settings.activeId || !win || win.isDestroyed()) return;
+  rec.checking = true;
+  rec.checkSeen = undefined;
+  rec.checkTitleAt = 0;
+  rec.checkLoadedAt = 0;
+  rec.signedIn = false;
+  rec.view = attachView(id); // never added to the window: nobody is looking
+  rec.view.webContents.loadURL(providerOf(id).start).catch(() => {});
+  rec.checkTimer = setTimeout(endCheckIn, checkInLimit(), id);
+  debug('[doze]', acctLabel(id), 'checking');
+}
+
+// The page out of sight has said something: is that enough to read it? Its
+// count has to hold for settleDelay() after the page finished loading, and a
+// count of zero — which is what a page shows while starting up — has to hold
+// for zeroHold() on top of that.
+function armCheckSettle(id) {
+  const rec = views.get(id);
+  if (!rec || !rec.checking) return;
+  clearTimeout(rec.settleTimer);
+  rec.settleTimer = null;
+  if (rec.checkSeen === undefined || !rec.checkLoadedAt) return;
+  const believeFrom = rec.checkSeen === 0 ? rec.checkLoadedAt + zeroHold() : rec.checkLoadedAt;
+  const wait = Math.max(rec.checkTitleAt, believeFrom) + settleDelay() - Date.now();
+  if (wait <= 0) return endCheckIn(id);
+  rec.settleTimer = setTimeout(armCheckSettle, wait, id);
+}
+
+function endCheckIn(id) {
+  const rec = views.get(id);
+  if (!rec || !rec.checking) return;
+  clearTimeout(rec.settleTimer);
+  clearTimeout(rec.checkTimer);
+  rec.settleTimer = rec.checkTimer = null;
+  rec.checking = false;
+  const wc = rec.view && rec.view.webContents;
+  const url = wc && !wc.isDestroyed() ? wc.getURL() : '';
+  if (wc && !wc.isDestroyed()) wc.close();
+  rec.view = null;
+  if (url && !providerOf(id).mailHosts.includes(hostOf(url))) {
+    // It was sent away to a sign-in page. Loading that again every few minutes
+    // is the last thing anyone wants (it is what puts passkey prompts on the
+    // screen), so it waits for the user to open the account.
+    rec.checkPaused = true;
+    log('[doze]', acctLabel(id), 'is signed out — not checking again until it is opened');
+  } else if (rec.checkSeen !== undefined) {
+    const { count, fresh } = settleCheckIn(rec.count, rec.checkSeen, {
+      known: rec.countKnown,
+      heldMs: rec.checkLoadedAt ? Date.now() - rec.checkLoadedAt : 0,
+      holdMs: zeroHold(), // the same amount armCheckSettle() waited
+    });
+    rec.count = count;
+    rec.countKnown = true;
+    if (fresh) showToast(id, `${fresh} new message${fresh > 1 ? 's' : ''}`);
+    updateBadge();
+  }
+  debug('[doze]', acctLabel(id), 'checked:', rec.checkSeen === undefined ? 'nothing' : rec.checkSeen);
+  pushAccounts();
+  armCheckIn(id);
+}
+
+// The user clicked an account while it was loading out of sight, or dozing
+// was switched off under it: stop reading, and keep that page — it is the
+// same page — as the account's own.
+function keepCheckingPage(id) {
+  const rec = views.get(id);
+  clearTimeout(rec.settleTimer);
+  clearTimeout(rec.checkTimer);
+  rec.settleTimer = rec.checkTimer = null;
+  rec.checking = false;
+  rec.loading = !rec.checkLoadedAt;
+  if (rec.checkSeen > 0) {
+    rec.count = rec.checkSeen; // what it has shown so far; the next count is a baseline, not new mail
+    rec.countKnown = true;
+  }
+  rec.rise = createRiseTracker();
+  if (win && !win.isDestroyed()) {
+    win.contentView.addChildView(rec.view);
+    layout();
+  }
+}
+
+// After anything that changes who is being looked at, who is loaded, or
+// whether the window is in sight: give every account the timers it should
+// have now. The timers are idempotent, so an account that is already waiting
+// keeps its place.
+function reconcile() {
+  for (const [id, rec] of views) {
+    if (id === settings.activeId && !rec.checking) {
+      disarmSleep(id);
+      disarmCheckIn(id);
+    } else if (rec.view) armSleep(id);
+    else armCheckIn(id);
+  }
+  armAwaySleep();
+}
+
+// ---------------------------------------------------------------------------
+// Away: the window is minimized, or fully covered
+// ---------------------------------------------------------------------------
+
+let hiddenSince = 0; // when the shell last reported the window out of sight; 0 = it is in sight
+let awayTimer = null;
+
+// Chromium tells a page when its window has gone out of sight — the same
+// signal it throttles the page on — and the shell passes it on.
+function windowSeen(visible) {
+  if (visible) {
+    hiddenSince = 0;
+    clearTimeout(awayTimer);
+    awayTimer = null;
+    const rec = views.get(settings.activeId);
+    if (rec && rec.awayAsleep) wakeView(settings.activeId); // back to an account that was unloaded meanwhile
+    return;
+  }
+  hiddenSince = Date.now();
+  armAwaySleep();
+}
+
+function armAwaySleep() {
+  if (awayTimer || !hiddenSince || !settings.sleepWhenAway || !settings.sleepAccounts) return;
+  awayTimer = setTimeout(awayCheck, sleepDelay());
+}
+
+// With "sleep when away" on, the account being shown is unloaded like a
+// background one once the window has been out of sight for sleepDelay(). Only
+// a service with a feed can be (nothing must stop notifying), and never while
+// something is in progress in it.
+async function awayCheck() {
+  awayTimer = null;
+  const id = settings.activeId;
+  const rec = views.get(id);
+  if (!hiddenSince || !rec || !rec.view || !providerOf(id).feed) return;
+  if (await inUse(id)) {
+    awayTimer = setTimeout(awayCheck, AWAY_RECHECK_MS); // leave it be, and look again
+    return;
+  }
+  if (hiddenSince) sleepView(id, { away: true }); // it may have come back into sight while `inUse` was being checked
+}
+
+// Whether unloading an account's page now would lose something the user is
+// doing: a window of that account is open (a pop-out compose, a call), or the
+// page has a compose box in it. Gmail marks its compose body with g_editable,
+// and nothing else on an Inbox page carries it; where no marker is known, a
+// focused text field counts.
+const COMPOSE_MARKERS = { gmail: '[g_editable="true"]' };
+async function inUse(id) {
+  const ses = session.fromPartition('persist:' + id);
+  if (BrowserWindow.getAllWindows().some((w) => w !== win && w !== settingsWin && !w.isDestroyed() && w.webContents.session === ses)) return true;
+  const rec = views.get(id);
+  const wc = rec && rec.view && rec.view.webContents;
+  if (!wc || wc.isDestroyed()) return false;
+  const marker = COMPOSE_MARKERS[providerOf(id).id];
+  if (!marker) return editableFocus.get(wc) === true;
+  try {
+    return (await wc.executeJavaScript(`!!document.querySelector(${JSON.stringify(marker)})`, false)) === true;
+  } catch {
+    return true; // could not tell: do not risk it
+  }
 }
 
 function switchTo(id) {
   if (!accountRecord(id)) return;
   ensureRecord(id); // never loaded this session (prefetch off)
   wakeView(id);
-  for (const [k, rec] of views) {
-    clearTimeout(rec.sleepTimer);
-    rec.sleepTimer = null;
-    if (rec.view) rec.view.setVisible(k === id);
-    if (k !== id) armSleep(k);
-  }
   settings.activeId = id;
+  for (const [k, rec] of views) if (rec.view) rec.view.setVisible(k === id);
+  reconcile();
   saveSettings();
   pushAccounts();
 }
@@ -583,14 +853,13 @@ function startAccounts() {
   }
   if (settings.prefetchAccounts) {
     setTimeout(() => {
-      if (!win) return;
-      for (const acct of settings.accounts) {
-        wakeView(acct.id);
-        if (acct.id !== settings.activeId) armSleep(acct.id);
-      }
+      if (!win || win.isDestroyed()) return;
+      for (const acct of settings.accounts) wakeView(acct.id);
       layout();
+      reconcile();
     }, PREFETCH_DELAY_MS);
   }
+  reconcile(); // with prefetch off, an account set to doze is checked from here
   pushAccounts();
 }
 
@@ -689,9 +958,19 @@ function onTitle(id, title) {
   const inbox = provider.inbox(title);
   if (!inbox) return;
   debug('[title]', id, JSON.stringify(title));
+  if (rec.checking) {
+    // Loaded out of sight to be read and closed again: note the count and wait
+    // for it to settle. endCheckIn() decides what it means.
+    rec.checkSeen = inbox.count;
+    rec.checkTitleAt = Date.now();
+    rec.signedIn = true;
+    armCheckSettle(id);
+    return;
+  }
   rec.titleAt = Date.now();
   rec.signedIn = true;
   rec.count = inbox.count;
+  rec.countKnown = true;
 
   if (provider.feed) {
     if (rec.titleCount !== undefined && inbox.count > rec.titleCount) pollFeed(id, { countedByTitle: true, retries: 2 }); // new mail just arrived: toast now, not at the next poll
@@ -747,8 +1026,10 @@ async function removeAccount(id) {
   if (response !== 0) return;
   clearInterval(rec.pollTimer);
   clearTimeout(rec.sleepTimer);
+  clearTimeout(rec.checkTimer);
+  clearTimeout(rec.settleTimer);
   if (rec.view && win && !win.isDestroyed()) {
-    win.contentView.removeChildView(rec.view);
+    if (!rec.checking) win.contentView.removeChildView(rec.view); // a page out of sight is not in the window
     rec.view.webContents.close();
   }
   views.delete(id);
@@ -813,6 +1094,13 @@ function accountIdFor(wc) {
 
 const providerForWebContents = (wc) => providerOf(accountIdFor(wc));
 
+// A page that is loaded only to be read (a check, see "dozing") belongs to
+// nobody: it is not in the window, and it may not put anything on screen.
+const isCheckPage = (wc) => {
+  for (const rec of views.values()) if (rec.checking && rec.view && rec.view.webContents === wc) return true;
+  return false;
+};
+
 // mailto: links open a compose window in the account they were clicked in.
 function openMailTo(mailtoUrl, wc) {
   const id = wc ? accountIdFor(wc) : settings.activeId;
@@ -856,6 +1144,7 @@ function wireNavigation(wc) {
   const isAppChrome = () => wc === (win && win.webContents) || wc === (settingsWin && settingsWin.webContents);
 
   wc.setWindowOpenHandler(({ url, disposition }) => {
+    if (isCheckPage(wc)) return { action: 'deny' };
     const target = unwrapGoogleRedirect(url);
     const kind = classifyUrl(target, providerForWebContents(wc));
     if (kind === 'mailto') {
@@ -1035,7 +1324,12 @@ function createWindow() {
   });
   win.loadFile(path.join(__dirname, 'shell', 'index.html'));
   // A test run shows its window without taking focus: it must not interrupt what the user is doing.
-  win.once('ready-to-show', () => (DIAGNOSTIC ? win.showInactive() : win.show()));
+  // The measurement rig keeps it hidden altogether unless its plan says otherwise.
+  win.once('ready-to-show', () => {
+    if (DIAGNOSTIC === '--bench') return;
+    if (DIAGNOSTIC) win.showInactive();
+    else win.show();
+  });
 }
 
 function openSettings() {
@@ -1100,23 +1394,38 @@ const ipcOn = (channel, fn) =>
     if (trusted(e)) fn(...args);
   });
 
-const PREF_KEYS = ['showBadge', 'prefetchAccounts', 'sleepAccounts', 'launchOnStartup'];
+const PREF_KEYS = ['showBadge', 'prefetchAccounts', 'sleepAccounts', 'sleepWhenAway', 'dozeOthers', 'launchOnStartup'];
 
 function setPref(key, value) {
   if (PREF_KEYS.includes(key) && typeof value === 'boolean') {
     settings[key] = value;
     if (key === 'launchOnStartup' && app.isPackaged) app.setLoginItemSettings({ openAtLogin: value });
     if (key === 'showBadge') updateBadge();
-    if (key === 'sleepAccounts') {
-      for (const [id, rec] of views) {
-        clearTimeout(rec.sleepTimer);
-        if (value && id !== settings.activeId) armSleep(id);
-      }
-    }
+    if (key === 'sleepAccounts' || key === 'sleepWhenAway' || key === 'dozeOthers') sleepPrefsChanged(key);
     saveSettings();
     pushAccounts();
   }
   return publicPrefs();
+}
+
+// One of the three unloading switches moved. Going on only starts timers
+// (reconcile()); going off also undoes what it had done.
+function sleepPrefsChanged(key) {
+  if (!settings[key] && key !== 'sleepWhenAway') {
+    // No more checks for any service that has no feed. One that was loaded for
+    // a check, or unloaded to be checked, goes back to being a normal account —
+    // except one that turned out to be signed out, which waits for a click.
+    for (const [id, rec] of views) {
+      if (providerOf(id).feed || rec.checkPaused) continue;
+      if (rec.checking) keepCheckingPage(id);
+      else if (!rec.view && rec.everLoaded) wakeView(id);
+    }
+  }
+  if (!settings[key] && key === 'sleepWhenAway') {
+    clearTimeout(awayTimer);
+    awayTimer = null;
+  }
+  reconcile();
 }
 
 ipcHandle('accounts:list', () => ({ accounts: accountsPayload(), prefs: publicPrefs() }));
@@ -1129,6 +1438,11 @@ ipcOn('shell:add-account', (p) => providerMenu(Math.round(p.x), Math.round(p.y))
 ipcOn('shell:mute-menu', (p) => muteMenu(Math.round(p.x), Math.round(p.y)));
 ipcOn('window:open-settings', openSettings);
 ipcOn('window:fit-settings', fitSettings);
+// Only the shell's own page reports whether the window is in sight (the
+// Settings window carries the same bridge, and its being covered means nothing).
+ipcMain.on('shell:visibility', (e, visible) => {
+  if (e.sender === (win && win.webContents)) windowSeen(visible === true);
+});
 ipcHandle('prefs:get', publicPrefs);
 ipcHandle('prefs:set', (p) => setPref(String(p.key), p.value));
 ipcHandle('mute:set', (until) => setMute(until));
@@ -1187,7 +1501,7 @@ if (!app.requestSingleInstanceLock() && !DIAGNOSTIC) {
       app.setLoginItemSettings({ openAtLogin: !!settings.launchOnStartup });
     }
     createWindow();
-    startAccounts();
+    if (DIAGNOSTIC !== '--bench') startAccounts(); // the measurement rig loads accounts on its own timetable
     const mailto = argWithMailTo(process.argv);
     if (mailto && !DIAGNOSTIC) setTimeout(() => openMailTo(mailto), 4000);
     if (DIAGNOSTIC) {
@@ -1202,6 +1516,10 @@ if (!app.requestSingleInstanceLock() && !DIAGNOSTIC) {
         settings,
         PROVIDERS,
         addAccount,
+        ensureRecord,
+        wakeView,
+        reconcile,
+        pushAccounts,
         switchTo,
         sleepView,
         openSettings,
@@ -1225,7 +1543,7 @@ if (!app.requestSingleInstanceLock() && !DIAGNOSTIC) {
         setAccountPref,
         setMute,
       };
-      require('./diagnostics').run(DIAGNOSTIC, target);
+      require(DIAGNOSTIC === '--bench' ? './bench' : './diagnostics').run(DIAGNOSTIC, target);
     }
   });
   app.on('window-all-closed', () => app.quit());

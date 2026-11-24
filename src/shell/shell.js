@@ -246,3 +246,8 @@ api.onSound(playChime);
 
 api.onState(render);
 api.list().then(render);
+
+// Chromium reports when the window goes out of sight — minimized, or fully
+// covered — through the page's visibility. The app uses it to unload the
+// account on screen once nobody is looking (a switch; off by default).
+document.addEventListener('visibilitychange', () => api.setVisible(document.visibilityState === 'visible'));

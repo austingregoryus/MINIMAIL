@@ -1,6 +1,6 @@
 'use strict';
 const api = window.minimail;
-const APP_KEYS = ['showBadge', 'prefetchAccounts', 'sleepAccounts', 'launchOnStartup'];
+const APP_KEYS = ['showBadge', 'prefetchAccounts', 'sleepAccounts', 'dozeOthers', 'sleepWhenAway', 'launchOnStartup'];
 // Each account's switches, and the column each appears in.
 const ACCOUNT_KEYS = ['count', 'sound', 'banner'];
 const COLUMN_LABELS = { count: 'Unread count', sound: 'Sound', banner: 'Pop-up' };

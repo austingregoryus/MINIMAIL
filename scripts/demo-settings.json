@@ -1,0 +1,31 @@
+{
+  "accounts": [
+    {
+      "id": "demo-gmail-1",
+      "provider": "gmail",
+      "label": "alex@example.com",
+      "notify": { "count": true, "sound": true, "banner": true }
+    },
+    {
+      "id": "demo-gmail-2",
+      "provider": "gmail",
+      "label": "sam@example.org",
+      "notify": { "count": true, "sound": false, "banner": true }
+    },
+    {
+      "id": "demo-proton",
+      "provider": "proton",
+      "label": "riley@example.net",
+      "notify": { "count": true, "sound": true, "banner": true }
+    }
+  ],
+  "activeId": "demo-gmail-1",
+  "sidebarCollapsed": false,
+  "prefetchAccounts": true,
+  "showBadge": true,
+  "sleepAccounts": true,
+  "dozeOthers": false,
+  "sleepWhenAway": false,
+  "launchOnStartup": false,
+  "mutedUntil": 0
+}

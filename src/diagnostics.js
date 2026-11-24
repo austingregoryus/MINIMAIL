@@ -640,6 +640,168 @@ async function experiment(target) {
     check('switching to it reloads it', !!woken.view && woken.loading === true);
     await sleep(4000);
     check('…and clears the loading state once the page is up', woken.loading === false);
+
+    // --- dozing: a service with no feed, unloaded and checked out of sight (a switch) ---------
+    const shell = (code) => target.win.webContents.executeJavaScript(code);
+    const setPref = (key, value) => shell(`window.minimail.setPref(${JSON.stringify(key)}, ${value})`);
+    const inWindow = (v) => target.win.contentView.children.includes(v);
+    // Time is simulated with short intervals: idle before unloading, between
+    // checks, how long a count has to hold, and how long a check may last.
+    const timings = { MINIMAIL_SLEEP_MS: '1200', MINIMAIL_DOZE_MS: '1200', MINIMAIL_SETTLE_MS: '500', MINIMAIL_ZERO_MS: '1500', MINIMAIL_CHECKIN_MS: '6000' };
+    Object.assign(process.env, timings);
+    const protonRec = () => target.views.get(protonId);
+    target.switchTo(id); // the Proton-titled account is in the background now
+    await setPref('dozeOthers', true);
+    check('once "doze" is on, a service with no feed unloads like the others', await until(() => !protonRec().view), `still loaded: ${!!protonRec().view}`);
+
+    // A check: the page comes back, out of sight, is read, and is closed again.
+    await until(() => protonRec().checking);
+    const midCheck = protonRec().view;
+    const listed = await account(protonId);
+    check('…then comes back out of sight to look for new mail', protonRec().checking && !!midCheck && !inWindow(midCheck), JSON.stringify(listed));
+    check('…counting as unloaded the while (there is nothing to click away from)', listed.asleep === true && listed.loading === false, JSON.stringify(listed));
+    await midCheck.webContents.executeJavaScript('blankPopup()'); // nobody is looking at this page: it may not put a window on screen
+    await sleep(900);
+    check('…and it may not open windows of its own', BrowserWindow.getAllWindows().length === 1, windowList().join(' | '));
+    const beforeCheck = toastsFor(protonId).length;
+    await setTitle(midCheck.webContents, '(5) Inbox | someone@proton.me | Proton Mail');
+    const sawRise = () => toastsFor(protonId).length > beforeCheck && JSON.stringify(toastsFor(protonId).slice(beforeCheck)) === JSON.stringify(['5 new messages']);
+    check('…reporting the new mail it saw', await until(sawRise), JSON.stringify(toastsFor(protonId).slice(beforeCheck)));
+    check('…and closing its page again', await until(() => !protonRec().checking && !protonRec().view));
+    check('…with its count brought up to date', (await account(protonId)).count === 5, JSON.stringify(await account(protonId)));
+
+    // Proton Mail shows "Inbox | …" (no number) before "(1200) Inbox | …" on
+    // every load, and shows nothing at all for an empty Inbox.
+    await until(() => protonRec().checking);
+    await setTitle(protonRec().view.webContents, 'Inbox | someone@proton.me | Proton Mail');
+    await until(() => !protonRec().checking);
+    check('an empty Inbox, once it has held, is taken as read', (await account(protonId)).count === 0, JSON.stringify(await account(protonId)));
+    check('…and raised nothing', toastsFor(protonId).length === beforeCheck + 1, JSON.stringify(toastsFor(protonId)));
+
+    await until(() => protonRec().checking);
+    const readPage = protonRec().view.webContents;
+    target.switchTo(protonId); // clicked while it was being read
+    check('clicking it while it is being read keeps that very page', protonRec().view && !protonRec().checking && protonRec().view.webContents === readPage && inWindow(protonRec().view));
+    // From here on it is watched like any open page: the next count is a
+    // baseline, and a rise inside the 15 s settling time of a freshly opened
+    // page is not new mail.
+    await setTitle(readPage, '(4) Inbox | someone@proton.me | Proton Mail');
+    await sleep(450);
+    await setTitle(readPage, '(6) Inbox | someone@proton.me | Proton Mail');
+    check('…and from there it is watched like any open page', (await account(protonId)).count === 6 && toastsFor(protonId).length === beforeCheck + 1, `${(await account(protonId)).count} | toasts: ${toastsFor(protonId).length}`);
+
+    target.switchTo(id);
+    await until(() => !protonRec().view); // in the background: unloaded again
+    await setPref('dozeOthers', false);
+    check('turning "doze" off brings back what it had unloaded', !!protonRec().view && !protonRec().checking && inWindow(protonRec().view), JSON.stringify(await account(protonId)));
+
+    // A zero seen only in passing: the page could not be read long enough to be
+    // sure, so the old count stands — and the next rise is counted from it.
+    process.env.MINIMAIL_ZERO_MS = '60000'; // longer than a check is allowed to last…
+    process.env.MINIMAIL_CHECKIN_MS = '1500'; // …so zero can never be confirmed here
+    await setPref('dozeOthers', true);
+    await until(() => !protonRec().view);
+    await until(() => protonRec().checking);
+    await setTitle(protonRec().view.webContents, 'Inbox | someone@proton.me | Proton Mail');
+    await until(() => !protonRec().checking);
+    check('a zero seen only in passing is not taken for an empty Inbox', (await account(protonId)).count === 6, JSON.stringify(await account(protonId)));
+    await until(() => protonRec().checking);
+    await setTitle(protonRec().view.webContents, '(8) Inbox | someone@proton.me | Proton Mail');
+    await until(() => !protonRec().checking);
+    check('…so mail after it is counted from the last count, not from zero', JSON.stringify(toastsFor(protonId).slice(-1)) === JSON.stringify(['2 new messages']), JSON.stringify(toastsFor(protonId).slice(-2)));
+
+    // A check that lands on a sign-in page must not be repeated — reloading a
+    // sign-in page over and over is what puts passkey prompts on screen.
+    // (about:blank stands in for the sign-in page: off the service's own site.)
+    await until(() => protonRec().checking);
+    protonRec().view.webContents.loadURL('about:blank').catch(() => {});
+    check('a check that ends on a sign-in page stops the checks', await until(() => !protonRec().checking && protonRec().checkPaused), `paused: ${protonRec().checkPaused}`);
+    await sleep(1500); // longer than one interval between checks
+    check('…for good: nothing is loaded again', !protonRec().checkTimer && !protonRec().view && !protonRec().checking);
+    target.switchTo(protonId);
+    check('…until the account is opened, which starts over', !!protonRec().view && !protonRec().checkPaused);
+    await setPref('dozeOthers', false);
+    process.env.MINIMAIL_CHECKIN_MS = '6000';
+
+    // --- "sleep when away": the account on screen, once the window is out of sight -----------
+    // The shell reports its page's visibility; this is the call it makes.
+    const seen = (visible) => shell(`window.minimail.setVisible(${visible})`);
+    target.switchTo(feedId); // the Gmail-like account is showing
+    await setPref('sleepWhenAway', true);
+    await seen(false); // minimized, or fully covered
+    check('the account on screen unloads once the window has been out of sight', await until(() => !target.views.get(feedId).view), JSON.stringify(await account(feedId)));
+    await seen(true);
+    check('…and comes back as soon as the window is seen again', !!target.views.get(feedId).view && (await account(feedId)).loading === true, JSON.stringify(await account(feedId)));
+
+    target.switchTo(protonId); // a service with no feed: nothing would keep notifying
+    await seen(false);
+    await sleep(1800); // past the idle time
+    check('never the account on screen of a service without a feed', !!protonRec().view);
+    await seen(true);
+
+    // Not while something is in progress. No compose marker is known for the
+    // lab's services, so a focused text field counts.
+    target.switchTo(feedId);
+    const shownWc = target.views.get(feedId).view.webContents;
+    await until(() => onPage(shownWc));
+    await shownWc.executeJavaScript("document.querySelector('#typing').focus()");
+    shownWc.sendInputEvent({ type: 'keyDown', keyCode: 'C' }); // the app re-checks focus after plain typing
+    shownWc.sendInputEvent({ type: 'keyUp', keyCode: 'C' });
+    await sleep(700);
+    await seen(false);
+    await sleep(1800);
+    check('not while a text field of the page has focus', !!target.views.get(feedId).view);
+
+    // …or a window of the account is open (here: a pop-up of its own).
+    await shownWc.executeJavaScript("document.activeElement.blur(); blankPopup()");
+    await sleep(1200);
+    await seen(true);
+    await seen(false);
+    await sleep(1800);
+    check('not while a window of that account is open', !!target.views.get(feedId).view && BrowserWindow.getAllWindows().length === 2, windowList().join(' | '));
+    await closeExtras();
+    await shownWc.sendInputEvent({ type: 'keyDown', keyCode: 'C' });
+    await shownWc.sendInputEvent({ type: 'keyUp', keyCode: 'C' });
+    await shownWc.executeJavaScript("document.activeElement.blur()");
+    await seen(true);
+    await seen(false);
+    check('…but once they are gone', await until(() => !target.views.get(feedId).view));
+    await seen(true);
+
+    // Gmail's compose body carries g_editable, and nothing else on an Inbox
+    // page does (checked on the real pages): a lab service under that name.
+    target.PROVIDERS.gmail = { ...target.PROVIDERS.localfeed, id: 'gmail', name: 'Gmail (lab stand-in)' };
+    const gmailId = target.addAccount('gmail'); // the showing account now
+    const gmailWc = target.views.get(gmailId).view.webContents;
+    await until(() => onPage(gmailWc));
+    await gmailWc.executeJavaScript("const box = document.createElement('div'); box.id = 'compose-box'; box.setAttribute('g_editable', 'true'); document.body.appendChild(box)");
+    await seen(false);
+    await sleep(1800);
+    check('not while the page has a compose box open', !!target.views.get(gmailId).view);
+    await gmailWc.executeJavaScript("document.getElementById('compose-box').remove()");
+    await seen(true);
+    await seen(false);
+    check('…but once it is closed', await until(() => !target.views.get(gmailId).view));
+    await seen(true);
+    await setPref('sleepWhenAway', false);
+
+    // --- the switches themselves -------------------------------------------------------------
+    target.openSettings();
+    for (let i = 0; i < 60 && !target.settingsWin; i++) await sleep(100);
+    const sw2 = target.settingsWin.webContents; // an earlier Settings window has been and gone
+    for (let i = 0; i < 80 && !(await sw2.executeJavaScript('!!document.getElementById("p-dozeOthers")').catch(() => false)); i++) await sleep(100);
+    await sleep(400);
+    const appSwitch = (key) => sw2.executeJavaScript(`(() => { const b = document.getElementById('p-${key}'); return b && { on: b.classList.contains('on'), label: b.getAttribute('aria-label') }; })()`);
+    const dozeSwitch = await appSwitch('dozeOthers');
+    check('Settings has a switch for unloading the other services', !!dozeSwitch && dozeSwitch.on === false && dozeSwitch.label.length > 10, JSON.stringify(dozeSwitch));
+    check('…and one for unloading the account on screen when away', (await appSwitch('sleepWhenAway')).on === false, JSON.stringify(await appSwitch('sleepWhenAway')));
+    await sw2.executeJavaScript("document.getElementById('p-dozeOthers').click()");
+    await sleep(400);
+    check('…and they save what they are clicked to', target.settings.dozeOthers === true && (await appSwitch('dozeOthers')).on === true);
+    await setPref('dozeOthers', false);
+    target.settingsWin.close();
+    await sleep(600);
+    for (const key of Object.keys(timings)) delete process.env[key];
     check('no hidden windows are left behind', BrowserWindow.getAllWindows().every((w) => w.isVisible()), windowList().join(' | '));
     check('nothing was sent to a browser but the one external link', opened.length === 1, opened.join(', '));
     check('nothing was requested from outside this machine', offMachine.length === 0, offMachine.slice(0, 4).join(' | '));

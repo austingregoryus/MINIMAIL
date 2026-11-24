@@ -1,7 +1,7 @@
 {
   "name": "minimail",
   "productName": "Minimail",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "One window for all your web mail - Gmail, Outlook, Yahoo, Proton and more",
   "private": true,
   "main": "src/main.js",
@@ -11,6 +11,7 @@
     "autotest": "electron . --autotest",
     "experiment": "electron . --experiment",
     "icons": "node scripts/make-icon.js",
+    "banner": "electron scripts/make-banner.js",
     "dist": "electron-builder --win",
     "icon-concepts": "node scripts/icon-concepts.js"
   },
