@@ -233,12 +233,12 @@ function riseStep(state, count, now) {
 // and closes it again, every few minutes. What the title last showed cannot
 // simply be taken as the count, because a page reports no count — or zero —
 // while it is still starting up (Proton Mail shows "Inbox | …" before
-// "(3957) Inbox | …"). So, between the count before and the last one seen:
+// "(1200) Inbox | …"). So, between the count before and the last one seen:
 // - a rise is real: no page reports more than it has while loading;
 // - a drop to a number above zero is real, for the same reason;
 // - a drop to zero is real only once the page has finished loading and has
 //   stayed at zero for CHECKIN_ZERO_HOLD_MS. Until then the old count stands,
-//   so a slow page can never turn its own start-up into "3957 new messages"
+//   so a slow page can never turn its own start-up into "1200 new messages"
 //   at the next check.
 // Returns the count to show and how many new messages arrived. `known` false
 // means the account's count has never been read this session: the first

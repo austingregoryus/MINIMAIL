@@ -670,7 +670,7 @@ async function experiment(target) {
     check('…and closing its page again', await until(() => !protonRec().checking && !protonRec().view));
     check('…with its count brought up to date', (await account(protonId)).count === 5, JSON.stringify(await account(protonId)));
 
-    // Proton Mail shows "Inbox | …" (no number) before "(3957) Inbox | …" on
+    // Proton Mail shows "Inbox | …" (no number) before "(1200) Inbox | …" on
     // every load, and shows nothing at all for an empty Inbox.
     await until(() => protonRec().checking);
     await setTitle(protonRec().view.webContents, 'Inbox | someone@proton.me | Proton Mail');

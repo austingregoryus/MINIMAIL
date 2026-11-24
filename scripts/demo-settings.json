@@ -3,19 +3,19 @@
     {
       "id": "demo-gmail-1",
       "provider": "gmail",
-      "label": "alex@gmail.com",
+      "label": "alex@example.com",
       "notify": { "count": true, "sound": true, "banner": true }
     },
     {
       "id": "demo-gmail-2",
       "provider": "gmail",
-      "label": "sam@northwind.co",
+      "label": "sam@example.org",
       "notify": { "count": true, "sound": false, "banner": true }
     },
     {
       "id": "demo-proton",
       "provider": "proton",
-      "label": "riley@proton.me",
+      "label": "riley@example.net",
       "notify": { "count": true, "sound": true, "banner": true }
     }
   ],

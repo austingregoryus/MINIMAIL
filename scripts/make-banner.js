@@ -109,7 +109,7 @@ const html = `<!doctype html><meta charset="utf-8"><style>
   <div class="chips">${chips}</div>
 </div>
 <div class="mock">
-  <div class="bar"><img src="${logo}" alt=""><span class="w">MINIMA<span class="i">I</span>L</span><span class="a">alex@gmail.com</span><span class="u">15</span></div>
+  <div class="bar"><img src="${logo}" alt=""><span class="w">MINIMA<span class="i">I</span>L</span><span class="a">alex@example.com</span><span class="u">15</span></div>
   <div class="body">
     <div class="side">
       ${accounts

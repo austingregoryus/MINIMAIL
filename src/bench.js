@@ -186,7 +186,7 @@ async function shot(wc, file) {
 // The two unloading switches, on short timers, on the real pages: what they
 // free, and — the point — what the service without a feed reports when it is
 // loaded out of sight, read and closed. Proton Mail shows "Inbox | …" (no
-// number) before "(3957) Inbox | …" on every load; none of that may come out
+// number) before "(1200) Inbox | …" on every load; none of that may come out
 // as new mail.
 async function dozeTimeline(target, accounts, at) {
   const toasts = [];
@@ -249,7 +249,9 @@ async function lingerTimeline(target, accounts, at) {
 // page is pixelated wherever mail is, and those places are read from the
 // page's own layout rather than looked for by eye, so nobody has to see the
 // mail to hide it. The window is shown, without focus, for about two seconds.
-const DEMO_LABELS = ['alex@gmail.com', 'sam@northwind.co', 'riley@proton.me', 'casey@yahoo.com', 'jordan@outlook.com', 'taylor@aol.com'];
+// Invented names for Minimail's own chrome, on domains that are reserved for
+// examples and so cannot be anybody's address.
+const DEMO_LABELS = ['alex@example.com', 'sam@example.org', 'riley@example.net', 'casey@example.com', 'jordan@example.org', 'taylor@example.net'];
 const DEMO_COUNTS = [3, 0, 12, 0, 0, 0];
 const PIXEL = 9; // one pixelated block, in CSS pixels
 
@@ -290,7 +292,7 @@ const PRIVATE_ZONES = {
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       const el = node.parentElement;
       if (!el || seen.has(el) || el.children.length > 12 || !tell.test(el.textContent)) continue;
-      seen.add(el); // tested as a whole: "1–50 of 362,255" and "10% of 10,244 GB used" are split across elements
+      seen.add(el); // tested as a whole: "1–50 of 1,234" and "25% of 15 GB used" are split across elements
       if (visible(el)) zones.push(box(el));
     }
     return { zones, vw: innerWidth, vh: innerHeight };
