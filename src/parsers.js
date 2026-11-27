@@ -91,34 +91,25 @@ function parseFeed(xml) {
   return { count, entries };
 }
 
-// Folds a freshly polled feed into an account's state and reports what is new.
-//
-//   state               the account's record; reads and writes seenKeys, count,
-//                       feedCount, and reads titleCount, hasView, titleAt, pollAt
-//   opts.countedByTitle the page title has already added this arrival to the count
-//   opts.retries        polls still allowed when the title saw new mail that the
-//                       feed has not listed yet (the feed can lag by a few seconds)
-//
-// Returns { fresh, retry }: the entries never seen before, and whether to poll
-// again shortly. New mail is "entries never seen before" rather than a rising
-// count, so reading or archiving mail never looks like an arrival.
-//
-// The count shown is the Inbox title's number, because that is the one Gmail
-// itself displays. The feed's own total is not comparable — it counts
-// differently (for one real mailbox: 894,721 against an Inbox title of
-// 218,388) — so it is only used until an Inbox title has been seen, and new
-// threads are added to the title's number from then on.
+// Keep a bounded history because unread entries can leave the feed window and
+// return. The feed and Inbox title count different things. Use the feed total
+// only before an Inbox title is available and keep the last title value after.
+const FEED_HISTORY_LIMIT = 1000;
 function mergeFeed(state, feed, opts = {}) {
-  const seen = state.seenKeys;
-  const fresh = seen ? feed.entries.filter((e) => e.id && !seen.has(e.id)) : [];
-  const retry = !!seen && !fresh.length && opts.retries > 0;
-
-  const titleCountedIt = opts.countedByTitle || (state.hasView && state.titleAt > state.pollAt); // the title changed during this poll
-  state.seenKeys = new Set(feed.entries.map((e) => e.id));
+  const initialized = !!state.seenKeys;
+  const seen = state.seenKeys || new Set();
+  const fresh = [];
+  for (const entry of feed.entries) {
+    if (!entry.id) continue;
+    if (initialized && !seen.has(entry.id)) fresh.push(entry);
+    seen.delete(entry.id);
+    seen.add(entry.id);
+  }
+  while (seen.size > FEED_HISTORY_LIMIT) seen.delete(seen.values().next().value);
+  state.seenKeys = seen;
   state.feedCount = feed.count;
-  if (state.titleCount === undefined) state.count = feed.count; // no Inbox title yet: the feed is all there is
-  else if (fresh.length && !titleCountedIt) state.count += fresh.length; // Inbox not on screen: count the new threads ourselves
-  return { fresh, retry };
+  if (state.titleCount === undefined) state.count = feed.count;
+  return { fresh, retry: initialized && !fresh.length && opts.retries > 0 };
 }
 
 // Gmail rewrites outbound links as www.google.com/url?q=<real-url>. Returns
@@ -136,7 +127,7 @@ function unwrapGoogleRedirect(url) {
   return url;
 }
 
-const WINDOWS_RESERVED = /^(con|prn|aux|nul|com\d|lpt\d)$/i;
+const WINDOWS_RESERVED = /^(?:con|prn|aux|nul|(?:com|lpt)[0-9¹²³])$/i;
 const MAX_FILENAME = 150; // leaves room for the Downloads path and " (2)" suffixes
 
 // Attachment names arrive from web pages: make them safe for the file system.
@@ -152,7 +143,7 @@ function sanitizeFilename(name) {
     const ext = dot > 0 ? s.slice(dot).slice(0, 20) : '';
     s = s.slice(0, MAX_FILENAME - ext.length).trimEnd() + ext;
   }
-  if (WINDOWS_RESERVED.test(s.replace(/\.[^.]*$/, ''))) s = '_' + s; // "nul.txt" cannot be written on Windows
+  if (WINDOWS_RESERVED.test(s.split('.')[0].trimEnd())) s = '_' + s;
   return s;
 }
 
@@ -167,7 +158,12 @@ function parseMailTo(mailtoUrl) {
     } catch {
       /* leave empty */
     }
-    for (const key of ['subject', 'body', 'cc', 'bcc']) out[key] = u.searchParams.get(key) || '';
+    const fields = new URLSearchParams(u.search.slice(1).replace(/\+/g, '%2B'));
+    for (const [name, value] of fields) {
+      const key = name.toLowerCase();
+      if (key === 'to' && value) out.to = [out.to, value].filter(Boolean).join(',');
+      else if (['subject', 'body', 'cc', 'bcc'].includes(key) && !out[key]) out[key] = value;
+    }
     return out;
   } catch {
     return null;
@@ -176,13 +172,14 @@ function parseMailTo(mailtoUrl) {
 
 // mailto:a@b.com?subject=..&body=.. -> Gmail's compose URL. Gmail spells the
 // subject parameter `su`.
-function mailToComposeUrl(mailtoUrl) {
+function mailToComposeUrl(mailtoUrl, slot = '0') {
   const m = parseMailTo(mailtoUrl);
   if (!m) return null;
   const params = new URLSearchParams();
   const gmail = { to: m.to, su: m.subject, body: m.body, cc: m.cc, bcc: m.bcc };
   for (const key of Object.keys(gmail)) if (gmail[key]) params.set(key, gmail[key]);
-  return `https://mail.google.com/mail/u/0/?view=cm&fs=1&tf=1&${params}`;
+  const mailbox = /^\d+$/.test(slot) ? slot : '0';
+  return `https://mail.google.com/mail/u/${mailbox}/?view=cm&fs=1&tf=1&${params}`;
 }
 
 // Page titles are the only signal a web mail app gives for free, so outside
@@ -210,7 +207,13 @@ function riseStep(state, count, now) {
     state.dip = undefined;
   }
   if (state.dip !== undefined) {
-    if (count === state.dip) return 0; // still down; too early to say whether it is real
+    if (count < state.base) {
+      if (count !== state.dip) {
+        state.dip = count;
+        state.dipAt = now;
+      }
+      return 0;
+    }
     // Back up while the drop is still unconfirmed. Measured against the level
     // before the drop, so 5 → 0 → 7 is two new messages and 5 → 0 → 5 is none.
     const fresh = count > state.base ? count - state.base : 0;

@@ -3,8 +3,7 @@
 // Electron — so `npm test` covers everything here.
 //
 // Which hosts belong to each service is the part that decides whether signing
-// in works: a sign-in redirect that is not listed would be thrown out of the
-// app and into the browser, and the session would never come back. The lists
+// in works. Redirects to a host outside the provider policy are stopped. The lists
 // for Outlook, Yahoo, AOL and Proton have not been confirmed against a real
 // sign-in yet.
 const { parseInboxCount, parseEmail, parseWebmailTitle, parseProtonTitle, parseMailTo, mailToComposeUrl } = require('./parsers');
@@ -24,24 +23,62 @@ const MICROSOFT_LOGIN = ['login.live.com', 'login.microsoftonline.com', 'login.m
 // The consent hop every Yahoo and AOL sign-in goes through.
 const YAHOO_LOGIN = (login) => [login, `api.${login}`, 'guce.yahoo.com', 'consent.yahoo.com'];
 
+const GMAIL_ORIGIN = 'https://mail.google.com';
+const gmailMailboxUrl = (slot = '0') => `${GMAIL_ORIGIN}/mail/u/${slot}/`;
+const gmailStart = (slot = '0') => {
+  const params = new URLSearchParams({ service: 'mail', continue: gmailMailboxUrl(slot) });
+  return `https://accounts.google.com/ServiceLogin?${params}`;
+};
+
+function gmailMailbox(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.origin !== GMAIL_ORIGIN) return null;
+    return /^\/mail\/u\/(\d+)(?:\/|$)/.exec(parsed.pathname)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function isGmailInbox(url) {
+  if (gmailMailbox(url) === null) return false;
+  const { pathname, hash, searchParams } = new URL(url);
+  return /^\/mail\/u\/\d+\/?$/.test(pathname) && !searchParams.has('view') && (!hash || hash === '#inbox');
+}
+
+function outlookCompose(defaultHost) {
+  return (mailto, host) => {
+    const selectedHost = OUTLOOK_MAIL.includes(host) ? host : defaultHost;
+    const prefix = selectedHost === OUTLOOK_MAIL[0] ? '/mail/0' : '/mail';
+    const query = composeQuery(mailto);
+    return query === null ? null : `https://${selectedHost}${prefix}/deeplink/compose?${query}`;
+  };
+}
+
 const PROVIDERS = {
   gmail: {
     id: 'gmail',
     name: 'Gmail',
     color: '#ea4335',
-    start: 'https://accounts.google.com/ServiceLogin?service=mail&continue=https://mail.google.com/mail/u/0/',
+    start: gmailStart(),
+    startForMailbox: gmailStart,
+    urlForMailbox: gmailMailboxUrl,
+    mailboxFromUrl: gmailMailbox,
+    isInboxUrl: isGmailInbox,
     mailHosts: ['mail.google.com'],
     hosts: ['mail.google.com', 'accounts.google.com'],
     downloadSuffixes: ['googleusercontent.com'],
     // The one service that can be checked with its page closed: a feed that
     // accepts the account's own cookies. What makes auto-sleep possible.
-    feed: { url: 'https://mail.google.com/mail/feed/atom', cookiesFor: 'https://mail.google.com' },
+    feed: { url: `${GMAIL_ORIGIN}/mail/feed/atom`, cookiesFor: GMAIL_ORIGIN },
+    feedForMailbox: (slot) => slot === '0' ? `${GMAIL_ORIGIN}/mail/feed/atom` : `${gmailMailboxUrl(slot)}feed/atom`,
     avatar: true,
-    inbox: (title) => {
+    inbox: (title, url) => {
+      if (!isGmailInbox(url)) return null;
       const count = parseInboxCount(title);
       return count === null ? null : { count, email: parseEmail(title) };
     },
-    compose: (mailto) => mailToComposeUrl(mailto),
+    compose: (mailto, _host, slot) => mailToComposeUrl(mailto, slot),
   },
   outlook: {
     id: 'outlook',
@@ -52,13 +89,7 @@ const PROVIDERS = {
     mailHosts: OUTLOOK_MAIL,
     hosts: [...OUTLOOK_MAIL, ...MICROSOFT_LOGIN],
     inbox: parseWebmailTitle,
-    compose: (mailto, host) => {
-      // A work or school account composes on its own server.
-      const work = OUTLOOK_MAIL.slice(1).includes((host || '').toLowerCase());
-      const base = work ? `https://${host}/mail/deeplink/compose` : 'https://outlook.live.com/mail/0/deeplink/compose';
-      const query = composeQuery(mailto);
-      return query === null ? null : `${base}?${query}`;
-    },
+    compose: outlookCompose(OUTLOOK_MAIL[0]),
   },
   'outlook-work': {
     id: 'outlook-work',
@@ -69,7 +100,7 @@ const PROVIDERS = {
     mailHosts: OUTLOOK_MAIL,
     hosts: [...OUTLOOK_MAIL, ...MICROSOFT_LOGIN],
     inbox: parseWebmailTitle,
-    compose: null, // set below: the same function as `outlook`, so the two cannot drift apart
+    compose: outlookCompose(OUTLOOK_MAIL[1]),
   },
   yahoo: {
     id: 'yahoo',
@@ -77,7 +108,7 @@ const PROVIDERS = {
     color: '#6001d2',
     start: 'https://mail.yahoo.com/',
     mailHosts: ['mail.yahoo.com'],
-    hosts: ['mail.yahoo.com', ...YAHOO_LOGIN('login.yahoo.com')],
+    hosts: ['mail.yahoo.com', 'compose.mail.yahoo.com', ...YAHOO_LOGIN('login.yahoo.com')],
     inbox: parseWebmailTitle,
     compose: (mailto) => {
       const query = composeQuery(mailto);
@@ -106,7 +137,6 @@ const PROVIDERS = {
     inbox: parseProtonTitle,
   },
 };
-PROVIDERS['outlook-work'].compose = PROVIDERS.outlook.compose;
 
 // The mark shown on the badge of each account avatar: an outline for the
 // services that have one, nothing for the others (they show their initial).
@@ -121,22 +151,29 @@ const PROVIDER_ORDER = ['gmail', 'outlook', 'outlook-work', 'yahoo', 'aol', 'pro
 //   'blank'    an empty popup target — let the page have its window
 //   'mailto'   opens a compose window in the account the link was clicked in
 //   'external' handed to the default browser
+//   'blocked'  rejected
+function webUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (['https:', 'http:'].includes(parsed.protocol) && !parsed.username && !parsed.password) return parsed;
+  } catch {
+    // Invalid or unsupported URL.
+  }
+  return null;
+}
+
 function classifyUrl(url, provider = PROVIDERS.gmail) {
   const s = String(url || '');
   if (/^mailto:/i.test(s)) return 'mailto';
   if (/^blob:/i.test(s)) return 'download';
   if (!s || /^about:(blank|srcdoc)$/i.test(s)) return 'blank';
-  let u;
-  try {
-    u = new URL(s);
-  } catch {
-    return 'external';
-  }
-  if (u.protocol !== 'https:' && u.protocol !== 'http:') return 'external';
+  const u = webUrl(s);
+  if (!u) return 'blocked';
   const host = u.hostname.toLowerCase();
   const under = (suffix) => host === suffix || host.endsWith('.' + suffix);
-  if ((provider.hosts || []).includes(host)) return 'app';
-  if ((provider.downloadSuffixes || []).some(under)) return 'download';
+  const trustedTransport = (u.protocol === 'https:' && !u.port) || u.origin === provider.testOrigin;
+  if (trustedTransport && (provider.hosts || []).includes(host)) return 'app';
+  if (trustedTransport && (provider.downloadSuffixes || []).some(under)) return 'download';
   return 'external';
 }
 
@@ -172,4 +209,4 @@ function accountColor(label, providerId, siblingIndex) {
   return `hsl(${h} ${Math.max(s, 8)}% ${l + shades[siblingIndex % shades.length]}%)`;
 }
 
-module.exports = { PROVIDERS, PROVIDER_ORDER, classifyUrl, accountColor, composeQuery };
+module.exports = { PROVIDERS, PROVIDER_ORDER, classifyUrl, webUrl, accountColor, composeQuery };

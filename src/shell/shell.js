@@ -6,13 +6,16 @@ const addBtn = document.getElementById('add');
 const collapseBtn = document.getElementById('collapse');
 const accountText = document.getElementById('account');
 const unreadChip = document.getElementById('unread');
+const accountButtons = new Map();
 
 function tooltip(a, index) {
   const who = /@/.test(a.label) ? `${a.label} (${a.providerName})` : `${a.providerName} account`;
   const shortcut = `(Ctrl+${index + 1})`;
+  if (a.loadFailed) return `${who} — could not load, select to retry ${shortcut}`;
   if (a.loading) return `${who} — loading… ${shortcut}`;
-  if (a.asleep) return `${who} — not loaded, click to load ${shortcut}`;
-  const unread = a.count ? ` — ${a.count.toLocaleString('en-US')} unread` : '';
+  const unread = a.showCount !== false && (a.count || a.countStale)
+    ? ` — ${a.count.toLocaleString('en-US')} unread${a.countStale ? ' (last known count)' : ''}` : '';
+  if (a.asleep) return `${who}${unread} — select to load ${shortcut}`;
   return `${who}${unread} ${shortcut}`;
 }
 
@@ -92,10 +95,28 @@ function render(state) {
 
   const accounts = state.accounts || [];
   const prefs = state.prefs || {};
-  root.textContent = '';
+  const ids = new Set(accounts.map((account) => account.id));
+  let restoreFocus = false;
+  for (const [id, button] of accountButtons) {
+    if (ids.has(id)) continue;
+    restoreFocus ||= button === document.activeElement;
+    button.remove();
+    accountButtons.delete(id);
+  }
   accounts.forEach((a, i) => {
-    const b = document.createElement('button');
-    b.type = 'button';
+    let b = accountButtons.get(a.id);
+    if (!b) {
+      b = document.createElement('button');
+      b.type = 'button';
+      b.addEventListener('click', () => api.switchTo(a.id));
+      b.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        api.menu(a.id, e.clientX, e.clientY);
+      });
+      accountButtons.set(a.id, b);
+    }
+    if (root.children[i] !== b) root.insertBefore(b, root.children[i] || null);
+    b.replaceChildren();
     b.className = 'acct' + (a.active ? ' active' : '') + (a.asleep ? ' asleep' : '') + (a.loading ? ' loading' : '');
     b.style.background = a.color;
     if (a.avatar) {
@@ -114,22 +135,19 @@ function render(state) {
       else b.textContent = (a.label || '?')[0].toUpperCase();
     }
     b.title = tooltip(a, i);
+    b.setAttribute('aria-label', b.title);
+    b.setAttribute('aria-pressed', String(a.active));
     // The badge says which service this is. It would only repeat the avatar
     // when that already shows the service's mark or initial.
     if (a.avatar || /@/.test(a.label || '')) b.appendChild(providerBadge(a));
-    if (a.showCount !== false && a.count) {
+    if (a.showCount !== false && (a.count || a.countStale)) {
       const dot = document.createElement('span');
       dot.className = 'dot';
-      dot.textContent = a.count > 99 ? '99+' : String(a.count);
+      dot.textContent = `${a.countStale ? '~' : ''}${a.count > 99 ? '99+' : a.count}`;
       b.appendChild(dot);
     }
-    b.addEventListener('click', () => api.switchTo(a.id));
-    b.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      api.menu(a.id, e.clientX, e.clientY);
-    });
-    root.appendChild(b);
   });
+  if (restoreFocus) (accountButtons.get(accounts.find((a) => a.active)?.id) || addBtn).focus();
 
   const empty = accounts.length === 0;
   addBtn.classList.toggle('pulse', empty);
@@ -138,21 +156,22 @@ function render(state) {
   const collapsed = prefs.sidebarCollapsed === true;
   document.body.classList.toggle('collapsed', collapsed);
   collapseBtn.innerHTML = collapsed ? collapsedChevron : '\u2039';
-  collapseBtn.title = `${collapsed ? 'Show' : 'Hide'} sidebar (Ctrl+Shift+B)`;
+  collapseBtn.title = `${collapsed ? 'Show' : 'Hide'} sidebar (Ctrl+Shift+B in Minimail controls)`;
 
   mutedUntil = Number(prefs.mutedUntil) || 0;
   showMute();
 
   const active = accounts.find((a) => a.active);
   const total = accounts.reduce((sum, a) => sum + a.count, 0);
+  const stale = accounts.some((a) => a.countStale);
   // Logo and wordmark are always there; the account and the unread total follow.
   const named = active && /@/.test(active.label) ? active.label : '';
   accountText.textContent = named;
   accountText.title = named;
   accountText.hidden = !named;
-  unreadChip.textContent = total ? total.toLocaleString('en-US') : '';
-  unreadChip.title = total ? `${total.toLocaleString('en-US')} unread` : '';
-  unreadChip.hidden = !total;
+  unreadChip.textContent = total || stale ? `${stale ? '~' : ''}${total.toLocaleString('en-US')}` : '';
+  unreadChip.title = total || stale ? `${total.toLocaleString('en-US')} unread${stale ? ' (includes last known counts)' : ''}` : '';
+  unreadChip.hidden = !total && !stale;
 }
 
 // The "which mail service?" menu opens where the button was clicked. A click
@@ -173,41 +192,58 @@ welcomeAdd.addEventListener('click', (e) => addAccount(e, welcomeAdd));
 // Download toast: slides into the title bar when a file finishes downloading.
 const dlToast = document.getElementById('dl-toast');
 const dlFile = document.getElementById('dl-file');
+const dlOpen = document.getElementById('dl-open');
+const dlFolder = document.getElementById('dl-folder');
 let dlQueue = [];
 let dlHideTimer = null;
+let dlReturnFocus = null;
 
 const hideToast = () => {
   clearTimeout(dlHideTimer);
+  if (dlToast.contains(document.activeElement)) (dlReturnFocus?.isConnected ? dlReturnFocus : addBtn).focus();
+  dlToast.inert = true;
   dlToast.classList.remove('show');
   dlQueue = [];
 };
 
 const hideToastSoon = () => {
   clearTimeout(dlHideTimer);
-  dlHideTimer = setTimeout(hideToast, 10000);
+  if (!dlToast.contains(document.activeElement)) dlHideTimer = setTimeout(hideToast, 10000);
 };
 
 function handleDownload(dl) {
   // The same download can arrive twice (push event and the startup catch-up).
-  if (!dl || !dl.path || (dlQueue.length && dlQueue[dlQueue.length - 1].path === dl.path)) return;
+  if (!dl || (!dl.path && !dl.failed) || (dl.id && dlQueue.at(-1)?.id === dl.id)) return;
   dlQueue.push(dl);
   if (dlQueue.length > 5) dlQueue = dlQueue.slice(-5);
   const last = dlQueue[dlQueue.length - 1];
-  dlFile.textContent = dlQueue.length > 1 ? `${last.file} (+${dlQueue.length - 1} more)` : last.file;
-  dlFile.title = last.path;
+  dlFile.textContent = last.failed ? `Download failed: ${last.file}` : dlQueue.length > 1 ? `${last.file} (+${dlQueue.length - 1} more)` : last.file;
+  dlFile.title = last.path || '';
+  if (last.failed && [dlOpen, dlFolder].includes(document.activeElement)) document.getElementById('dl-close').focus();
+  dlOpen.hidden = dlFolder.hidden = last.failed === true;
+  if (dlToast.inert) dlReturnFocus = document.activeElement === document.body ? null : document.activeElement;
+  dlToast.inert = false;
   dlToast.classList.add('show');
   hideToastSoon();
 }
 
 dlToast.addEventListener('mouseenter', () => clearTimeout(dlHideTimer)); // don't vanish under the cursor
 dlToast.addEventListener('mouseleave', hideToastSoon);
-document.getElementById('dl-close').addEventListener('click', hideToast);
-document.getElementById('dl-open').addEventListener('click', () => {
-  const last = dlQueue[dlQueue.length - 1];
-  if (last) api.openFile(last.path);
-  hideToast();
+dlToast.addEventListener('focusin', (e) => {
+  if (!dlToast.contains(e.relatedTarget)) dlReturnFocus = e.relatedTarget;
+  clearTimeout(dlHideTimer);
 });
-document.getElementById('dl-folder').addEventListener('click', () => {
+dlToast.addEventListener('focusout', () => setTimeout(hideToastSoon));
+document.getElementById('dl-close').addEventListener('click', hideToast);
+dlOpen.addEventListener('click', async () => {
+  const last = dlQueue.at(-1);
+  if (!last?.path) return;
+  const error = await api.openFile(last.path).catch(() => true);
+  if (dlQueue.at(-1) !== last) return;
+  if (!error && error !== undefined) return hideToast();
+  dlFile.textContent = `Could not open ${last.file}`;
+});
+dlFolder.addEventListener('click', () => {
   const last = dlQueue[dlQueue.length - 1];
   if (last) api.showFolder(last.path);
   hideToast();

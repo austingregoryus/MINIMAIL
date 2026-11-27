@@ -33,6 +33,7 @@ test('riseStep: a dip that bounces back is a reconnect, not new mail', () => {
   assert.deepEqual(run([[5, 0], [0, 3000], [5, 3100], [6, 4000]]), [0, 0, 0, 1]);
   // The low count repeats inside the hold (measured from when the dip started), then recovers.
   assert.deepEqual(run([[5, 0], [0, 3000], [0, 3100], [5, 3200]]), [0, 0, 0, 0]);
+  assert.deepEqual(run([[10, 0], [7, 3000], [6, 3100], [10, 3200]]), [0, 0, 0, 0]);
 });
 
 test('riseStep: …but a dip that lasts the whole hold is taken as real', () => {

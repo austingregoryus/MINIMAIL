@@ -127,15 +127,13 @@ test('mergeFeed: an unloaded account shows the feed count', () => {
 });
 
 test('mergeFeed: once the Inbox title has spoken, sleeping does not change the number', () => {
-  // Gmail's feed total is not the Inbox count (894,721 vs 218,388 on a real
-  // mailbox), so an account must not jump between the two as it sleeps.
-  const state = { count: 218388, seenKeys: new Set(['a']), hasView: false, titleCount: 218388, titleAt: 1000, pollAt: 9000 };
-  const out = p.mergeFeed(state, feed(['a'], 894721));
+  const state = { count: 10, seenKeys: new Set(['a']), titleCount: 10 };
+  const out = p.mergeFeed(state, feed(['a'], 100));
   assert.deepEqual(out.fresh, []);
-  assert.equal(state.count, 218388); // still what Gmail's Inbox showed
-  p.mergeFeed(state, feed(['c', 'b', 'a'], 894723));
-  assert.equal(state.count, 218390); // …plus the two threads that arrived while it slept
-  assert.equal(state.feedCount, 894723);
+  assert.equal(state.count, 10);
+  p.mergeFeed(state, feed(['c', 'b', 'a'], 102));
+  assert.equal(state.count, 10);
+  assert.equal(state.feedCount, 102);
 });
 
 test('mergeFeed: an awake account with no Inbox title yet shows the feed count', () => {
@@ -144,12 +142,12 @@ test('mergeFeed: an awake account with no Inbox title yet shows the feed count',
   assert.equal(state.count, 7);
 });
 
-test('mergeFeed: new threads are reported, and counted when no Inbox is on screen', () => {
+test('mergeFeed: new threads are reported independently of a previously verified Inbox count', () => {
   const state = { count: 10, seenKeys: new Set(['a']), hasView: true, titleCount: 10, titleAt: 1000, pollAt: 5000 };
   const out = p.mergeFeed(state, feed(['c', 'b', 'a'], 12)); // reading a conversation; two new threads arrived
   assert.deepEqual(out.fresh.map((e) => e.id), ['c', 'b']);
   assert.equal(out.retry, false);
-  assert.equal(state.count, 12); // 10 + 2: the badge must move even though the title has no count
+  assert.equal(state.count, 10);
 });
 
 test('mergeFeed: the page title already counted it — never count it twice', () => {
@@ -159,9 +157,29 @@ test('mergeFeed: the page title already counted it — never count it twice', ()
   assert.equal(byTitle.count, 11);
 
   // The race: a timer poll was already in flight when the title changed.
-  const racing = { count: 11, seenKeys: new Set(['a']), hasView: true, titleCount: 11, titleAt: 9000, pollAt: 8000 };
+  const racing = { count: 11, seenKeys: new Set(['a']), titleCount: 11 };
   assert.equal(p.mergeFeed(racing, feed(['b', 'a'], 11)).fresh.length, 1);
   assert.equal(racing.count, 11);
+});
+
+test('mergeFeed: entries returning to the feed window and duplicate IDs are reported once', () => {
+  const state = { count: 0 };
+  p.mergeFeed(state, feed(['a'], 1));
+  assert.deepEqual(p.mergeFeed(state, feed(['b', 'b'], 1)).fresh.map(({ id }) => id), ['b']);
+  assert.deepEqual(p.mergeFeed(state, feed(['a', 'b'], 2)).fresh, []);
+});
+
+test('parseMailTo accepts query recipients, case-insensitive fields and literal plus signs', () => {
+  const result = p.parseMailTo('MAILTO:one@example.org?To=two+tag@example.org&Subject=One+two&body=One%20two');
+  assert.equal(result.to, 'one@example.org,two+tag@example.org');
+  assert.equal(result.subject, 'One+two');
+  assert.equal(result.body, 'One two');
+});
+
+test('sanitizeFilename handles multi-extension and superscript Windows device names', () => {
+  assert.equal(p.sanitizeFilename('NUL.tar.gz'), '_NUL.tar.gz');
+  assert.equal(p.sanitizeFilename('COM¹.csv'), '_COM¹.csv');
+  assert.equal(p.sanitizeFilename('LPT².txt'), '_LPT².txt');
 });
 
 test('mergeFeed: reading or archiving mail is not new mail', () => {

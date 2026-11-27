@@ -1,7 +1,7 @@
 {
   "name": "minimail",
   "productName": "Minimail",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "One window for all your web mail - Gmail, Outlook, Yahoo, Proton and more",
   "private": true,
   "license": "MIT",
@@ -25,7 +25,10 @@
     },
     "files": [
       "src/**/*",
-      "package.json"
+      "!src/bench.js",
+      "!src/diagnostics.js",
+      "package.json",
+      "LICENSE"
     ],
     "protocols": {
       "name": "Email",
@@ -54,7 +57,10 @@
     }
   },
   "devDependencies": {
-    "electron": "^45.2.3",
-    "electron-builder": "^26.18.0"
+    "electron": "^45.5.0",
+    "electron-builder": "^26.18.1"
+  },
+  "overrides": {
+    "minimatch@>=7 <11": "11.0.1"
   }
 }
