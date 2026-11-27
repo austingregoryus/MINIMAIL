@@ -67,7 +67,7 @@ Auto-sleep is on by default. The two *Also unload…* switches are off, because 
 
 ## Install
 
-Minimail is for Windows 10 and 11. There are no packaged releases yet, so build the installer yourself:
+Minimail is for Windows 10 and 11. Download the x64 installer from the [latest GitHub release](https://github.com/austingregoryus/MINIMAIL/releases/latest), or build it from source:
 
 ```
 npm install
